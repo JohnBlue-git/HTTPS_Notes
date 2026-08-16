@@ -140,7 +140,7 @@ TLS 只用非對稱式密碼學來*建立*共享密鑰（透過憑證＋金鑰�
 <a id="cn-4"></a>
 ## 4) 雜湊、MAC 與數位簽章
 
-### 雜湊函數
+### Hash 雜湊函數
 
 雜湊函數接受任意長度的輸入，產生固定長度的指紋（digest）。
 
@@ -161,8 +161,13 @@ Message Authentication Code（訊息驗證碼）用來證明資料沒有被竄�
 簽章證明一則訊息確實來自某把特定私鑰的持有者，且內容未遭竄改。
 
 ```text
-Sign:   signature = Encrypt_with_private_key( Hash(message) )
-Verify: Hash(message) ==? Decrypt_with_public_key( signature )
+Sign:   產生簽章 signature = Encrypt( Hash(message), private key )
+      |
+      v
+  message, signature
+      |
+      v
+Verify: 計算雜湊 Hash(message) == 解密簽章 Decrypt( signature, public key )
 ```
 
 （實際的演算法如 RSA-PSS 與 ECDSA 並非真的「把雜湊值加密」，但這個示意能表達其中的概念。）
@@ -282,13 +287,14 @@ Use HTTP/2 frames on this connection
 
 標準的憑證格式是 X.509。主要欄位：
 
-- **Subject** — 這張憑證所代表的對象是誰（例如 `CN=example.com`）
-- **Subject Alternative Name（SAN）** — 這張憑證實際生效的主機名稱清單；現代 client 完全忽略 `CN` 欄位，只檢查 SAN
-- **Issuer** — 由哪個 CA 簽署這張憑證
-- **Validity** — `Not Before` / `Not After` 有效日期
-- **Subject Public Key Info** — 這張憑證所背書的公鑰
-- **Extensions** — `Key Usage`、`Extended Key Usage`、`Basic Constraints`（是否為 CA？）、`Authority Key Identifier`、OCSP/CRL 位置
-- **Signature** — 發證單位對上述所有內容的簽章
+- Certificate Info
+  - **Subject** — 這張憑證所代表的對象是誰（例如 `CN=example.com`）
+  - **Subject Alternative Name（SAN）** — 這張憑證實際生效的主機名稱清單；現代 client 完全忽略 `CN` 欄位，只檢查 SAN
+  - **Issuer** — 由哪個 CA 簽署這張憑證
+  - **Validity** — `Not Before` / `Not After` 有效日期
+  - **Subject Public Key Info** — 這張憑證所背書的公鑰
+  - **Extensions** — `Key Usage`、`Extended Key Usage`、`Basic Constraints`（是否為 CA？）、`Authority Key Identifier`、OCSP/CRL 位置
+- **CA Signature** — 發證單位對上述所有內容的簽章
 
 實際檢視一張憑證：
 
@@ -309,7 +315,7 @@ Intermediate CA
    |
    |  signs
    v
-Leaf / server certificate (example.com)
+Leaf / server certificate (server.crt)
 ```
 
 - **Root CA** 會盡可能保持離線 — 一旦 root 私鑰外流，它曾經簽發過的每一張憑證都會變得可疑。
@@ -324,6 +330,16 @@ Leaf / server certificate (example.com)
 4. 檢查所請求的主機名稱是否符合 leaf 憑證 SAN 清單裡的某一項
 5. 檢查撤銷狀態 — CRL（Certificate Revocation List）或 OCSP（Online Certificate Status Protocol）；**OCSP stapling** 讓伺服器自行取得並附上這項證明，避免 client 多一次往返，也避免隱私外洩（否則 CA 就能得知你造訪過的每個網站）
 6. 檢查 `Basic Constraints`/`Key Usage` 擴充欄位是否與每張憑證的角色一致（例如只有標示為 CA 的憑證才能簽署其他憑證）
+7. 認證 Certificate 跟 CA Signature
+```text
+Sign: 產生 CA Signature = Encrpt( Hash(CertInfo || Server Public Key), CA Private Key )
+        |
+        v
+  CertInfo ( with Server Public Key ), CA signature
+        |
+        v
+Verify: 計算 Cert 雜湊 Hash( CertInfo || Server Public Key ) == 解密 CA 簽章 Decrpt( CA Signature, CA Public Key )
+```
 
 只要任何一個步驟失敗，連線就應該被拒絕 — 而不是靜默降級成不加密連線。
 
@@ -347,43 +363,117 @@ Leaf / server certificate (example.com)
 ### TLS 1.2 完整握手
 
 ```text
-Client                                             Server
-  | -- ClientHello --------------------------------> |
-  |    (client random, cipher suites, SNI, ALPN,     |
-  |     supported_groups, key_share candidates)      |
-  |                                                  |
-  | <- ServerHello --------------------------------- |
-  | <- Certificate --------------------------------- |
-  | <- ServerKeyExchange (ECDHE params, signed) ---- |
-  | <- ServerHelloDone ----------------------------- |
-  |                                                  |
-  | -- ClientKeyExchange (ECDHE params) -----------> |
-  | -- [ChangeCipherSpec] -------------------------> |
-  | -- Finished (encrypted) -----------------------> |
-  |                                                  |
-  | <- [ChangeCipherSpec] -------------------------- |
-  | <- Finished (encrypted) ------------------------ |
-  |                                                  |
-  | === Application Data (encrypted, both ways) ==== |
+=================================================================================================================
+【 階段一：事前準備與信任鏈建立 (PKI Setup) 】
+=================================================================================================================
+
+  【 Root / Intermediate CA 】
+    │ - CA Private Key (CA 嚴密保管，用來發憑證)
+    │ - CA Public Key  (內建於 Client Trust Store / 作業系統中)
+    │
+    │  (1) Server 提交 CSR (包含 Server Public Key)
+    │  (2) CA 驗證身份後發放憑證：
+    └───────────────┐
+                    ▼
+          ┌─────────────────────────────────────────────────────────┐
+          │  Server Certificate (server.crt)                        │
+          ├─────────────────────────────────────────────────────────┤
+          │  • Domain Name: *.example.com                           │
+          │  • Server Public Key (長期非對稱公鑰)                     │
+          │  • CA Signature = Sign(Cert Hash, CA Private Key)       │
+          └─────────────────────────────────────────────────────────┘
+
+
+=================================================================================================================
+【 階段二：TLS 1.2 Handshake (身分驗證與金鑰交換) 】
+=================================================================================================================
+
+Client                                                                Server
+ (擁有 CA Public Key)                                                 (擁有 Server Private Key & Certificate)
+  │                                                                                 │
+  │ ─── 1. ClientHello ───────────────────────────────────────────────────────────> │
+  │       (ClientRandom, Cipher Suites, SNI, ALPN, Supported Groups)                │
+  │                                                                                 │
+  │ <── 2. ServerHello ──────────────────────────────────────────────────────────── │
+  │       (ServerRandom, Selected Cipher Suite)                                     │
+  │                                                                                 │
+  │ <── 3. Certificate ──────────────────────────────────────────────────────────── │
+  │       (server.crt；內含 Server Public Key 與 CA Signature)                       │
+  │                                                                                 │
+  │ <── 4. ServerKeyExchange ────────────────────────────────────────────────────── │
+  │  ECDHE Signature = E( Hash(ClientRandom || ServerRandom || Server ECDHE PubKey) |
+  |                     , Server Private Key )                                      |
+  │       (Server ECDHE PubKey + ECDHE Signature)                                   │
+  │                                                                                 │
+  │ <── 5. ServerHelloDone ──────────────────────────────────────────────────────── │
+  │                                                                                 │
+  │  [Client 驗證階段]                                                               │
+  │  A. 用 CA Public Key 驗證 Certificate                                            │
+  │     → 確認憑證是 CA 簽發，且從中取出 Server Public Key                               │
+  │   1. 解密 CA 簽章： Hash_ca = Decrpt( CA Signature, CA Public Key )               │
+  │   2. 計算 Cert 雜湊： Hash_cert = Hash( CertInfo || Server Public Key )           │
+  │   3. 公式驗證：     Hash_ca  ==  Hash_cert                                        │
+  │      └──> 驗證通過：從 CertInfo 提取出 Server Public Key                           │
+  │                                                                                 │
+  │  B. 用 Server Public Key 驗證 Server ECDHE 簽章                                   │
+  │     → 證明資料未被竄改，且 Server 確實持有對應私鑰                                    │
+  │   驗證：H(ClientRandom || ServerRandom || ECDHE PubKey)                          |
+  |       == D(ECDHE Signature, Server Public Key)                                  │
+  │       └──> 驗證通過：確認 ECDHE 參數安全，且 Server 持有私鑰                          │
+  │                                                                                 │
+  │ ─── 6. ClientKeyExchange ─────────────────────────────────────────────────────> │
+  │       (Client ECDHE PubKey)                                                     │
+  │                                                                                 │
+  │ ─── 7. [ChangeCipherSpec] & Finished ─────────────────────────────────────────> │
+  │                                                                                 │
+  │ <── 8. [ChangeCipherSpec] & Finished ────────────────────────────────────────── │
+  │                                                                                 │
+  │  [雙方獨立算出同一把對稱金鑰]                                                       │
+  │  Client: Compute(Client ECDHE PrivKey + Server ECDHE PubKey + Randoms)          │
+  │                                                                                 │
+  │  【 Session Key / AES Key 】 <─────── 兩者一致 ────────                           │
+  │                                                                                 │
+  │  Server: Compute(Server ECDHE PrivKey + Client ECDHE PubKey + Randoms)          │
+  │                                                                                 │
+
+=================================================================================================================
+【 階段三：Application Data 傳輸 (對稱加密) 】
+=================================================================================================================
+
+  Client                                                                         Server
+    │                                                                               │
+    │ === 9. HTTP / HTTPS 資料傳輸 (用【對稱金鑰 Session Key】雙向加密) ===              │
+    │                                                                               │
 ```
+
+這張圖其實把握手拆成三個層次：
+
+1. **PKI Setup**：先讓 client 擁有 CA 的信任根，讓它知道「這張 server 憑證是由可信任的 CA 簽發」
+2. **TLS Handshake**：透過 `ClientHello` / `ServerHello` / `Certificate` / `ServerKeyExchange` 進行身分驗證與金鑰協商
+3. **Application Data**：握手完成後，雙方切換到高效率的對稱式加密，開始傳送實際的 HTTP 資料
 
 每個階段發生的事：
 
-1. **ClientHello** — client 提出 TLS 版本、cipher suite、一個隨機亂數，以及各種擴充欄位（SNI、ALPN、金鑰交換用的 supported groups）
-2. **ServerHello** — server 選定版本／cipher suite，送出自己的隨機亂數
-3. **Certificate** — server 送出它的憑證鏈
-4. **ServerKeyExchange** — server 送出它暫時性的 (EC)DHE 公開值，並用該憑證對應的私鑰簽署（這個簽章正是把暫時性金鑰交換與已驗證身分綁在一起的關鍵）
-5. client 驗證憑證鏈（見 [§8](#cn-8)）與簽章，接著送出自己的暫時金鑰分享值
-6. 雙方現在各自獨立透過 Diffie-Hellman 運算算出同一把共享密鑰，並由此衍生出對稱式 session 金鑰
-7. **Finished** 訊息（第一批加密訊息）讓雙方確認彼此都衍生出相同的金鑰，且握手過程中沒有任何內容遭到竄改
-8. 應用層資料開始流動，以協商好的 AEAD 加密演算法加密
+1. **ClientHello** — client 提出 TLS 版本、cipher suite、一個隨機亂數，以及各種擴充欄位（SNI、ALPN、`supported_groups` 等）
+2. **ServerHello** — server 選定版本／cipher suite，送出自己的隨機亂數，並回應協商結果
+3. **Certificate** — server 送出它的憑證鏈，讓 client 能驗證 server 身分
+4. **ServerKeyExchange** — server 送出暫時性的 `(EC)DHE` 公開值，並用該憑證對應的私鑰簽署；這個簽章把「臨時金鑰交換」與「已驗證身分」綁在一起
+5. **Client 驗證** — client 先驗證憑證鏈（見 [§8](#cn-8)），確認憑證是由信任 CA 簽發，再用 server 公鑰驗證 `ServerKeyExchange` 的簽章；若成功，表示資料未被篡改，且 server 確實持有對應私鑰
+6. **ClientKeyExchange** — client 送出自己的暫時金鑰分享值，雙方各自以自己的私鑰與對方的公開值，透過 Diffie-Hellman 計算出同一把共享密鑰
+7. **Finished** — 兩邊各自發送加密後的 `Finished` 訊息，確認彼此都衍生出相同的金鑰，且握手過程中沒有任何內容遭到修改
+8. **Application Data** — 握手完成後，雙方開始用協商好的 AEAD 演算法（例如 AES-GCM、ChaCha20-Poly1305）加密實際 HTTP 請求／回應
 
-在第一個位元組的應用層資料送出之前，大約要花掉 **2 個往返（round trip）**。
+這些步驟的核心目標就是：
+
+- 驗證伺服器身分：避免中間人偽造
+- 協商共享對稱金鑰：讓後續流量可以用高速、低成本的對稱式加密
+- 用 `Finished` 確認金鑰一致：避免「兩邊各自算出不同鑰匙」或資料被篡改
+
+在第一個位元組的應用層資料送出之前，大約會花掉 **2 個往返（round trip）**。
 
 ### 簡化握手（Session Resumption）
 
 每次連到剛造訪過的網站都重新走一次完整握手很浪費。TLS 會快取足夠的狀態，藉此跳過大部分流程：
-
 - **Session ID** — server 保留 session 狀態，client 只需提醒它那個 ID
 - **Session Tickets**（RFC 5077） — server 把自己的 session 狀態加密成一張 ticket 交給 client；伺服器端不需要儲存任何東西，因此擴充性更好
 
@@ -396,7 +486,7 @@ Client                                Server
   | ======== Application Data ========  |
 ```
 
-這能把握手縮短成 **1 個往返**，並完全跳過憑證驗證與非對稱式金鑰交換（重複使用原始 session 衍生出的密鑰來產生新的金鑰）。
+這能把握手縮短成 **1 RTT 往返**，並完全跳過憑證驗證與非對稱式金鑰交換（重複使用原始 session 衍生出的密鑰來產生新的金鑰）。
 
 TLS 1.3 的握手與 0-RTT 恢復機制差異夠大，值得另外畫一張圖 — 見 [§14](#cn-14)。
 
@@ -407,6 +497,84 @@ TLS 1.3 的握手與 0-RTT 恢復機制差異夠大，值得另外畫一張圖 �
 - server 送出額外的 `CertificateRequest` 訊息
 - client 回覆自己的 `Certificate`，以及一個 `CertificateVerify` 簽章，證明自己持有該憑證對應的私鑰
 - 至此雙方的身分都已透過密碼學方式互相驗證
+
+```text
+=================================================================================================================
+【 階段一：事前準備與信任鏈建立 (PKI Setup) 】
+=================================================================================================================
+
+  【 Root / Intermediate CA 】
+    │ - CA Private Key (CA 嚴密保管，用來發憑證)
+    │ - CA Public Key  (雙方各自預先內建於對方的 Trust Store 中)
+    │
+    ├─ (1) Server 提交 CSR ──> 發放 Server Certificate (server.crt) ──> 存於 Server
+    └─ (2) Client 提交 CSR ──> 發放 Client Certificate (client.crt) ──> 存於 Client (mTLS 補充)
+
+
+=================================================================================================================
+【 階段二：TLS 1.2 Handshake (mTLS 雙向身分驗證與金鑰交換) 】
+=================================================================================================================
+
+Client                                                                Server
+ (擁有 Server CA Public Key                                            (擁有 Client CA Public Key
+  及 Client Private Key & client.crt)                                   及 Server Private Key & server.crt)
+  │                                                                                 │
+  │ ─── 1. ClientHello ───────────────────────────────────────────────────────────> │
+  │       (ClientRandom, Cipher Suites, SNI, ALPN, Supported Groups)                │
+  │                                                                                 │
+  │ <── 2. ServerHello ──────────────────────────────────────────────────────────── │
+  │       (ServerRandom, Selected Cipher Suite)                                     │
+  │                                                                                 │
+  │ <── 3. Certificate ──────────────────────────────────────────────────────────── │
+  │       (server.crt；內含 Server Public Key 與 CA Signature)                       │
+  │                                                                                 │
+  │ <── 4. ServerKeyExchange ────────────────────────────────────────────────────── │
+  │       (Server ECDHE PubKey + ECDHE Signature)                                   │
+  │                                                                                 │
+  │ <── 4.5 CertificateRequest ───────────────────────────────────────────────────  │ <== [mTLS 補充]
+  │       (Server 要求 Client 提供憑證，可附上受信任 CA 清單)                            │
+  │                                                                                 │
+  │ <── 5. ServerHelloDone ──────────────────────────────────────────────────────── │
+  │                                                                                 │
+  │  [Client 驗證 Server 階段]                                                       │
+  │  A. 用 CA Public Key 驗證 server.crt (取出 Server Public Key)                     │
+  │  B. 用 Server Public Key 驗證 Server ECDHE 簽章 (確認 Server 身份與參數安全)         │
+  │                                                                                 │
+  │ ─── 5.5 Certificate ──────────────────────────────────────────────────────────> │ <== [mTLS 補充]
+  │       (client.crt；內含 Client Public Key 與 CA Signature)                       │
+  │                                                                                 │
+  │ ─── 6. ClientKeyExchange ─────────────────────────────────────────────────────> │
+  │       (Client ECDHE PubKey)                                                     │
+  │                                                                                 │
+  │ ─── 6.5 CertificateVerify ───────────────────────────────────────────────────>  │ <== [mTLS 補充]
+  │       Signature = E( Hash(所有歷史 Handshake 訊息), Client Private Key )          │
+  │                                                                                 │
+  │                                                                                 │
+  │        [Server 驗證 Client 階段]                                                 │ <== [mTLS 補充]
+  │        A. 用 CA Public Key 驗證 client.crt → 確認憑證合法並取出【Client Public Key】 │
+  │        B. 用 Client Public Key 驗證 Client ECDHE 簽章 ((確認 Client 身份與參數安全)) │
+  │                                                                                 │
+  │ ─── 7. [ChangeCipherSpec] & Finished ─────────────────────────────────────────> │
+  │                                                                                 │
+  │ <── 8. [ChangeCipherSpec] & Finished ────────────────────────────────────────── │
+  │                                                                                 │
+  │  [雙方獨立算出同一把對稱金鑰]                                                       │
+  │  Client: Compute(Client ECDHE PrivKey + Server ECDHE PubKey + Randoms)          │
+  │                                                                                 │
+  │  【 Session Key / AES Key 】 <─────── 兩者一致 ────────                           │
+  │                                                                                 │
+  │  Server: Compute(Server ECDHE PrivKey + Client ECDHE PubKey + Randoms)          │
+  │                                                                                 │
+
+=================================================================================================================
+【 階段三：Application Data 傳輸 (對稱加密) 】
+=================================================================================================================
+
+  Client                                                                         Server
+    │                                                                               │
+    │ === 9. HTTP / HTTPS 資料傳輸 (用【對稱金鑰 Session Key】雙向加密) ===              │
+    │                                                                               │
+```
 
 ---
 
@@ -623,14 +791,198 @@ openssl speed aes-128-gcm          # benchmark a cipher on this machine
 - **Chunked transfer encoding** — 回應本文可以在不預先知道總長度的情況下邊產生邊串流傳送
 - **Pipelining** — 技術上允許不等前一個回應就送出下一個請求，但會遭受 head-of-line blocking 問題（一個慢回應會擋住排在它後面的所有請求），實務上瀏覽器幾乎都不使用它
 
+概念圖：Persistent connections
+```text
+HTTP/1.0：每個請求都要新開一條 TCP 連線
+
+Client                Server
+  | -- Req1 -->        |
+  |                    |
+  | -- Req2 -->        |
+  |                    |
+  | -- Req3 -->        |
+  |                    |
+  | -- Req4 -->        |
+  |                    |
+  └─────────────┬──────┘
+                │ 4 個獨立連線
+                │ + 4 次 TCP 握手
+                │ + 4 次 TLS 握手（若走 HTTPS）
+
+
+HTTP/1.1：同一條 TCP 連線可承載多個請求
+
+Client                   Server
+  | -- Req1 ------------------------> |
+  | -- Req2 ------------------------> |
+  | -- Req3 ------------------------> |
+  | -- Req4 ------------------------> |
+  | <--- Res1 ----------------------- |
+  | <--- Res2 ----------------------- |
+  | <--- Res3 ----------------------- |
+  | <--- Res4 ----------------------- |
+  └───────────────────────────────┬───┘
+                                  │ 1 條連線重複使用
+                                  │ TCP / TLS 握手成本大幅降低
+
+底層連線的唯一識別：5-Tuple（五元組）
+對作業系統與 Web 伺服器來說，一個 HTTPS 連線是由 TCP 5-Tuple（五元組） 唯一確定的：
+  源 IP 地址 (Source IP)
+  源端口 (Source Port) — Client 端隨機分派
+  目的 IP 地址 (Destination IP)
+  目的端口 (Destination Port) — 通常是 443
+  傳輸層協定 (TCP 或 UDP)
+
+只要 Client 端發起連線時，這個五元組相同，伺服器就會認定這是 「同一個 Connection」。TLS 握手完成後算出的對稱金鑰（Session Key） 也會直接綁定在這個 Connection 上。
+
+這就是「持久連線」的價值：**把原本很多個短命連線，合併成一條長連線**，讓請求/回應能反覆重用，降低握手與重複建立連線的成本。
+```
+
 ### HTTP/2（2015 年，RFC 7540）
 
 - 使用**二進位分幀（Binary framing）**取代文字解析
-- **多工（Multiplexing）** — 同一個連線上可以有許多個並行的 stream，解決了 HTTP/1.1「每個 host 開 6 條連線」這種變通做法
 - **Header 壓縮（HPACK）** — header 會被壓縮，並與先前的請求做差異比對
+- **多工（Multiplexing）** — 同一個連線上可以有許多個並行的 stream，解決了 HTTP/1.1「每個 host 開 6 條連線」這種變通做法
 - **Server Push** — 伺服器可以主動推送它預期 client 會需要的資源；實務上這項功能已被淘汰，並從大多數瀏覽器中移除（例如 Chrome 已在 2022 年移除），原因是現實世界中的快取效益不佳
 - 實務上必須搭配 TLS — 沒有任何主流瀏覽器支援明文的 HTTP/2（`h2c`）
 - 仍然會遇到 **TCP 層級**的 head-of-line blocking：一個封包遺失就會卡住*所有*多工的 stream，因為它們共用同一條 TCP byte stream
+
+概念圖：HPACK header compression
+```text
+HTTP/1.1：每個請求都把幾乎相同的 Header 重複發送
+
+Request 1
+GET /index.html
+Host: example.com
+User-Agent: curl/8.0
+Accept: */*
+
+Request 2
+GET /app.js
+Host: example.com
+User-Agent: curl/8.0
+Accept: */*
+
+=> 很多 header 重複，浪費頻寬
+
+
+HTTP/2 / HPACK：先建立動態字典（Dynamic Table），後續只傳「差異」
+
+Dynamic Table（伺服器 / client 共用）
+------------------------------------------------
+| 索引 | 欄位名稱         | 欄位值                 |
+| 1    | :method          | GET                 |
+| 2    | :scheme          | https               |
+| 3    | :authority       | example.com         |
+| 4    | user-agent       | curl/8.0            |
+| 5    | accept           | */*                 |
+------------------------------------------------
+
+Request 2 的 Header 其實很多都已經知道：
+
+原始：
+  :method = GET
+  :authority = example.com
+  user-agent = curl/8.0
+  accept = */*
+
+HPACK 壓縮後只傳：
+  [Index 1] [Index 3] [Index 4] [Index 5]
+
+=> 只傳「引用索引」或「與前次差異的增量」
+=> 這就是 HPACK： header 不是整份重送，而是對先前資料做差異比對
+
+
+概念上的心智模型：
+- 先共享一份常見 Header 字典
+- 後續請求只傳「我用的是哪個索引」或「新值和舊值差什麼」
+- 這樣可以大幅降低 Header 重複度，提升載入效率
+
+這是 HTTP/2 的另一個關鍵優化：**header 不再像 HTTP/1.x 一樣整段重複重送，而是透過索引表與差異比對來壓縮**。這特別適合多個資源同時下載時，因為每個請求的 header 會有大量重複字串。
+```
+
+概念圖：Binary framing
+```text
+HTTP/1.x：訊息是文字型態，必須逐行解析
+
+GET /index.html HTTP/1.1
+Host: example.com
+User-Agent: curl/8.0
+Accept: */*
+
+
+HTTP/2：訊息被切成二進位 frame，再交給 stream / priority / length 管理
+
++-----------------------------------------------------------+
+| Frame Header                                              |
+|  - Length                                                 |
+|  - Type                                                   |
+|  - Flags                                                  |
+|  - Stream ID                                              |
++---------------------- +------------------------------------+
+                       |
+                       v
+              +------------------+
+              | DATA / HEADERS  |
+              |  frame payload   |
+              +------------------+
+
+        例如：
+        HEADERS frame  -> 這個 stream 的 header
+        DATA frame     -> 這個 stream 的 body
+        SETTINGS frame -> 協商連線層參數
+
+
+好處：
+- 不再依賴「\r\n」分隔來解析
+- frame 可以被高效地多工、重排、流量控制
+- 一個 stream 的資料不必和另一個 stream 的資料混在同一份純文字訊息裡
+
+這個差異很重要：**HTTP/1.x 是以「文字請求/回應」為核心，而 HTTP/2 是以「二進位 frame stream」為核心**。也就是說，HTTP/2 不再像 HTTP/1.x 一樣用一大段可讀文字去描述整個請求，而是把它拆成一個個 frame，然後由 stream 來組裝這些資料。
+```
+
+概念圖：Multiplexing vs HOL blocking
+```text
+HTTP/1.1：每個請求幾乎要自己佔用一條連線
+
+Req A ──┐
+Req B ──┼──> 連線 1
+Req C ──┤
+Req D ──┘
+
+Req E ──┐
+Req F ──┼──> 連線 2
+Req G ──┤
+Req H ──┘
+
+=> 需要很多條連線，且請求只好排隊等待
+
+
+HTTP/2：同一條 TCP 連線上有多個獨立 stream
+
+TCP Connection
+-------------------------------------------------
+| Stream 1 | Stream 2 | Stream 3 | Stream 4 | 
+| HTML     | CSS      | JS       | IMG      | 
+|  Req     |  Req     |  Req     |  Req     | 
+-------------------------------------------------
+
+「多工」的意思是：
+- 多個 stream 並行存在於同一個連線內
+- 不是每個請求都要拆成新連線
+- 一個大資源不會完全封住其他小資源的傳輸
+- 伺服器收到混雜在一起的 Frame 後，直接依據 Stream ID 重新組裝出對應的 Request，完全不需要排隊，實現場平行的雙向多工傳輸
+
+但注意：
+  TCP 仍是一條單一 byte stream
+  一個封包遺失 => TCP 重新整理順序 => 所有 stream 都可能被卡住
+
+     [封包遺失]
+           ↓
+   TCP 重傳 / 排序修正
+           ↓
+   所有 stream 共同等待
+```
 
 ### HTTP/3（2022 年，RFC 9114，基於 QUIC，RFC 9000）
 
@@ -640,15 +992,61 @@ openssl speed aes-128-gcm          # benchmark a cipher on this machine
 - **連線遷移（Connection migration）** — 連線能撐過網路環境的變化（例如從 Wi-Fi 切到行動網路），因為連線是以 Connection ID 識別，而不是 IP/port 組合
 - 可以對曾經造訪過的伺服器提供 **0-RTT** 重新連線（與 TLS 1.3 0-RTT 有相同的重送風險考量 — 見 [§14](#cn-14)）
 
+概念圖：stream independency
+```text
+QUIC Connection (Connection ID)
+-------------------------------------------------
+| Stream 1 | Stream 2 | Stream 3 | Stream 4 | 
+| HTML     | CSS      | JS       | IMG      | 
+| 可靠傳輸  | 可靠傳輸   | 可靠傳輸  | 可靠傳輸  | 
+-------------------------------------------------
+
+一個封包遺失時，只有它所屬的 stream 受影響
+其他 stream 可繼續傳輸，不會全部卡住
+```
+
+概念圖：Connection migration
+```text
+HTTP/2 / TCP：連線識別依賴 IP + Port
+
+Client (Wi‑Fi)      ──────── 連線 ────────>   Server
+  IP: 10.0.0.5:52134
+
+切換到 4G / 行動網路後：
+Client (4G)          ──────── 連線 ────────>   Server
+  IP: 192.168.1.50:43122
+
+=> 這兩者其實是「不同的 TCP 連線」
+=> 連線中斷 / 重新建立 / 重新握手
+
+
+HTTP/3 / QUIC：連線識別依賴 Connection ID
+
+Client (Wi‑Fi)               Server
+   [Connection ID: CID-42]  <──────>  [Connection ID: CID-42]
+         │
+         ├─ 切換到 4G 時，IP 變了，但 Connection ID 不變
+         │
+         └─ 仍然視為同一條連線
+
+=> 連線可「遷移」而不必重建整個會話
+=> 對移動端與切換網路的場景更加友善
+
+這也是 HTTP/3 一個很關鍵的變化：**它從「以 IP/Port 來識別連線」改成「以 Connection ID 來識別連線」**，因此在 Wi‑Fi ↔ 行動網路切換時，連線可以繼續存在，不一定立即失效。
+```
+
 ### 比較表
 
-| | HTTP/1.0 | HTTP/1.1 | HTTP/2 | HTTP/3 |
-|---|---|---|---|---|
-| 傳輸層 | TCP | TCP | TCP | QUIC (UDP) |
-| 所需連線數 | 多 | 較少（持久連線） | 一條（多工） | 一條（多工） |
-| Header 壓縮 | 無 | 無 | HPACK | QPACK |
-| Head-of-line blocking | 有（嚴重） | 有 | 僅傳輸層 | 無 |
-| TLS 整合方式 | 獨立層 | 獨立層 | 獨立層，透過 ALPN | 內建於傳輸層 |
+| 比較項目 | HTTP/1.0 | HTTP/1.1 | HTTP/2 | HTTP/3 |
+| :--- | :--- | :--- | :--- | :--- |
+| **傳輸層** | TCP | TCP | TCP | **QUIC (UDP)** |
+| **支援/主流 TLS 版本** | TLS 1.0 / 1.1 / 1.2 *(早期 SSL 3.0)* | TLS 1.2 / 1.3 *(可不用 TLS，走明文 HTTP)* | **TLS 1.2 / 1.3** *(瀏覽器與規範強制要求)* | **僅支援 TLS 1.3** *(標準規範內建)* |
+| **TLS 整合方式** | 獨立層 (Over TLS) | 獨立層 (Over TLS) | 獨立層，透過 **ALPN** 協商 (`h2`) | **原生內建**於 QUIC 傳輸層 |
+| **首次連線握手延遲** *(傳輸層 + TLS)* | **3 RTT**<br>*(1 TCP + 2 TLS 1.2)* | **2~3 RTT**<br>*(1 TCP + 1~2 TLS)* | **2~3 RTT**<br>*(1 TCP + 1~2 TLS)* | **1 RTT**<br>*(QUIC 傳輸層與 TLS 1.3 握手合併)* |
+| **快速恢復連線延遲** *(Resumption)* | **2 RTT** *(Session ID)* | **1~2 RTT** *(Session Ticket)* | **1~2 RTT** *(Session Ticket / PSK)* | **0 RTT** *(TLS 1.3 0-RTT PSK)* |
+| **所需連線數** | 多 | 較少（持久連線） | 一條（多工） | 一條（多工） |
+| **Header 壓縮** | 無 | 無 | HPACK | QPACK |
+| **Head-of-line blocking** | 有（嚴重） | 有 | 僅傳輸層 (TCP 隊頭阻塞) | **完全無** |
 
 某條連線最終實際使用哪個版本，是在 TLS 握手期間由 ALPN（或 QUIC 對應的機制）決定的 — 見 [§7](#cn-7)。
 
@@ -664,6 +1062,7 @@ Client                                Server
   | -------- SYN ----------------------> |
   | <----- SYN-ACK --------------------- |
   | -------- ACK ----------------------> |   (TCP connected)
+  |                                      |
   | -------- ClientHello --------------> |
   | <------- ServerHello + Cert -------- |
   | -------- Key Exchange/Finished ----> |
@@ -902,11 +1301,271 @@ openssl s_client -connect <bmc>:443 -servername <bmc> </dev/null 2>/dev/null | o
 <a id="cn-20"></a>
 ## 20) bmcweb 原始碼走讀
 
-原始碼：[github.com/openbmc/bmcweb](https://github.com/openbmc/bmcweb)（main 分支）。以下是程式碼庫中，Part 2 與 Part 4 的觀念實際以 C++ 搭配 Boost.Asio 實作出來的位置。
+原始碼：[github.com/openbmc/bmcweb](https://github.com/openbmc/bmcweb)（`main` 分支）。以下為程式碼庫中，將網路連線、TLS 握手、HTTP 路由與業務邏輯以 C++ 搭配 **Boost.Asio / Boost.Beast** 實作說明的完整走讀。
 
-### A. TLS 實作：連線層 vs PEM 載入
+---
 
-`http/http_connection.hpp` **不會**直接解析 PEM — 它只處理連線層級的 TLS 流程（偵測是否為 SSL、握手、ALPN 路由）。PEM 載入是另外在 SSL context 初始化階段進行的，位於 `src/ssl_key_handler.cpp`。
+### A. TLS 實作：連線層 vs PEM 載入 vs 業務 Router
+
+`http/http_connection.hpp` **不會**直接解析 PEM 憑證檔 — 它僅處理連線層級的 TLS 流程（偵測是否為 SSL、握手、ALPN 路由）。PEM 載入是在 SSL Context 初始化階段進行，位於 `src/ssl_key_handler.cpp`。
+
+在架構設計上，**業務 Handler（Business Handler）與連線層（Connection Layer）已完全解耦**。完整的分層設計如下：
+
+```text
+[ Socket 物理層 ] (TCP / TLS Socket)
+       ↓
+[ 連線與解析層 ] http/http_connection.hpp (Connection::handle)
+       ↓
+[ 路由分派層   ] http/routing.hpp (Router::handle)
+       ↓
+[ 業務邏輯層   ] redfish-core/lib/*.hpp (handleXxxGet / handleXxxPost)
+       ↓
+[ 系統服務層   ] D-Bus Call / DB / Custom Logic
+
+```
+
+### B. 端到端（End-to-End）完整請求生命週期
+
+一個 HTTP/HTTPS 請求從「TCP/TLS Socket 建立」**到**「Response 寫回 Socket」的完整流程如下：
+
+```text
+[SOCKET START]
+  1. Boost.Asio Server Acceptor (http/http_server.hpp: doAccept)
+     ↓
+  2. TLS 握手與資料讀取 (http/http_connection.hpp: start -> async_handshake -> doRead)
+     ↓
+  3. HTTP Request 解析完成 (http/http_connection.hpp: afterReadHeaders -> handle)
+     ↓
+  4. 路由匹配與分派 (http/routing.hpp: Router::handle -> rule.handle)
+     ↓
+  5. 執行 Redfish 業務邏輯 (redfish-core/lib/*.hpp: handleXxx -> 非同步 D-Bus Async I/O)
+     ↓
+[BUSINESS LOGIC COMPLETED]
+  6. AsyncResp 引用計數歸零解構 (include/async_resp.hpp: ~AsyncResp -> res.end)
+     ↓
+  7. 觸發請求完成 Callback (http/http_connection.hpp: completeRequest)
+     ↓
+  8. 物理封包寫回 Socket (http/http_connection.hpp: doWrite -> boost::beast::http::async_write)
+[SOCKET END]
+
+```
+
+### C. 核心原始碼逐段剖析
+
+#### 【階段 1】建立 Listen 與 Accept 新連線
+
+* **檔案位置：** `http/http_server.hpp`
+* **說明：** bmcweb 啟動時會建立 `boost::asio::ip::tcp::acceptor`。當收到新 TCP 連線時，會實例化 `Connection` 物件並呼叫 `start()`。
+
+```cpp
+// http/http_server.hpp
+void doAccept()
+{
+    acceptor->async_accept(
+        *httpStream, [this, httpStream](const boost::system::error_code& ec) {
+            if (!ec)
+            {
+                // 建立 Connection 物件實例並啟動連線處理
+                std::make_shared<Connection<Adaptor, Handler>>(
+                    handler, std::move(*httpStream), sslContext)
+                    ->start();
+            }
+            doAccept();
+        });
+}
+```
+
+#### 【階段 2】TLS Handshake 與位元流讀取
+
+* **檔案位置：** `http/http_connection.hpp`
+* **說明：** 若啟用 TLS，連線啟動時會透過 Boost.Asio 執行 `async_handshake`。握手成功後進入 `doRead()` 循環讀取 Socket 位元組，直到 HTTP Header 讀取完畢後觸發 `afterReadHeaders()`。
+
+```cpp
+// http/http_connection.hpp
+void start()
+{
+    if constexpr (std::is_same_v<Adaptor, boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>)
+    {
+        // 執行 TLS 握手
+        adaptor.async_handshake(
+            boost::asio::ssl::stream_base::server,
+            [self(shared_from_this())](const boost::system::error_code& ec) {
+                if (!ec) { self->doRead(); }
+            });
+    }
+    else 
+    { 
+        doRead(); 
+    }
+}
+
+void doRead()
+{
+    // 透過 Boost.Beast 讀取 HTTP Request Header
+    boost::beast::http::async_read_header(
+        adaptor, buffer, *parser,
+        [self(shared_from_this())](const boost::system::error_code& ec, std::size_t bytesTransferred) {
+            self->afterReadHeaders(self, ec, bytesTransferred);
+        });
+}
+
+void afterReadHeaders(const std::shared_ptr<self_type>& /*self*/,
+                      const boost::system::error_code& ec,
+                      std::size_t bytesTransferred)
+{
+    /* 身份驗證、 Header 格式檢查等 */
+    if (parser->is_done())
+    {
+        handle();  // 標頭解析完成，進入業務邏輯分派
+        return;
+    }
+    doRead();
+}
+```
+
+#### 【階段 3】連線層 → 路由層交接
+
+* **檔案位置：** `http/http_connection.hpp`
+* **說明：** 建立 `AsyncResp` 傳送物件，並將 `completeRequest` 註冊為 Response 完成時的回呼函式，最後將 Request 丟給 Router 處理。
+
+```cpp
+// http/http_connection.hpp
+void handle()
+{
+    auto asyncResp = std::make_shared<bmcweb::AsyncResp>();
+    asyncResp->res.setCompleteRequestHandler(
+        [self(shared_from_this())](Response& thisRes) {
+            self->completeRequest(thisRes);  // 當 Response 完成時回傳連線層
+        });
+    
+    if (doUpgrade(asyncResp))  // WebSocket / HTTP2 Upgrade 檢查
+    {
+        return;
+    }
+    
+    handler->handle(req, asyncResp);  // 傳遞給 Router 進行匹配
+}
+```
+
+#### 【階段 4】路由分派 (Router)
+
+* **檔案位置：** `http/routing.hpp`
+* **說明：** `Router::handle()` 根據 URL Path 與 HTTP Method 尋找匹配的 Rule，並轉發給對應的業務 Handler。
+
+```cpp
+// http/routing.hpp
+void handle(const std::shared_ptr<Request>& req,
+            const std::shared_ptr<bmcweb::AsyncResp>& asyncResp)
+{
+    FindRouteResponse foundRoute = findRoute(*req);
+    
+    if (foundRoute.route.rule == nullptr)
+    {
+        // 404 Not Found 或 405 Method Not Allowed 處理
+        asyncResp->res.result(boost::beast::http::status::not_found);
+        return;
+    }
+    
+    BaseRule& rule = *foundRoute.route.rule;
+    std::vector<std::string> params = std::move(foundRoute.route.params);
+    
+    BMCWEB_LOG_DEBUG("Matched rule '{}' {} / {}", rule.rule,
+                     req->methodString(), rule.getMethods());
+    
+    rule.handle(*req, asyncResp, params);  // 呼叫具體的業務 Handler
+}
+```
+
+#### 【階段 5】執行業務 Handler 與 RAII 機制
+
+* **檔案位置：** `redfish-core/lib/service_root.hpp` 與 `include/async_resp.hpp`
+* **說明：** 業務邏輯層（如 Redfish API）進行 D-Bus 呼叫並填寫 JSON 回應。`AsyncResp` 採用 **RAII 技術**，當非同步呼叫全部結束、`AsyncResp` 引用計數歸零解構時，會觸發 `res.end()`。
+
+```cpp
+// redfish-core/lib/service_root.hpp
+inline void handleServiceRootGet(
+    App& app, const crow::Request& req,
+    const std::shared_ptr<bmcweb::AsyncResp>& asyncResp)
+{
+    if (!redfish::setUpRedfishRoute(app, req, asyncResp))
+    {
+        return;
+    }
+    
+    // 填寫 JSON 回應資料（亦可能在此發起非同步 D-Bus 請求）
+    asyncResp->res.jsonValue["@odata.type"] = "#ServiceRoot.v1_13_0.ServiceRoot";
+    
+    // 當函式結束且非同步 D-Bus Callback 皆完成時，shared_ptr<AsyncResp> 解構
+}
+
+// include/async_resp.hpp
+struct AsyncResp
+{
+    crow::Response res;
+    ~AsyncResp()
+    {
+        // 當 AsyncResp 引用計數歸零，解構子自動觸發 res.end()
+        // res.end() 會呼叫先前設定好的 completeRequestHandler (即 completeRequest)
+        res.end();
+    }
+};
+```
+
+---
+
+#### 【階段 6】標頭補全 (Complete Request)
+
+* **檔案位置：** `http/http_connection.hpp`
+* **說明：** 當 `res.end()` 被觸發後，流程回到連線層的 `completeRequest()`，為 Response 補上 Security Headers 與 HTTP 狀態。
+
+```cpp
+// http/http_connection.hpp
+void completeRequest(Response& thisRes)
+{
+    // 補齊 HTTP 安全標頭 (Security Headers) 與 Content-Type 等
+    addSecurityHeaders(*req, thisRes);
+    
+    // 設定 Keep-Alive 狀態
+    res.keepAlive(req->keepAlive());
+    
+    // 進入物理封包發送階段
+    doWrite();
+}
+
+```
+
+---
+
+#### 【階段 7】將 Response 寫回 Socket (True End)
+
+* **檔案位置：** `http/http_connection.hpp`
+* **說明：** 透過 Boost.Beast 的 `async_write` 將完裝好的 HTTP Response 透過 TLS/TCP Stream 寫回 Client。若連線為 Keep-Alive 則清空 Parser 並重置連線準備讀取下一筆 Request，否則調用 `close()` 關閉 Socket。
+
+```cpp
+// http/http_connection.hpp
+void doWrite()
+{
+    // 透過 Boost.Beast 將 HTTP Response 寫回 Socket/TLS Adaptor
+    boost::beast::http::async_write(
+        adaptor, res.stringResponse().value(),
+        [self(shared_from_this())](const boost::system::error_code& ec, std::size_t bytesTransferred) {
+            if (ec) { return; }
+            
+            // 若為 Keep-Alive 連線，重置 Parser 並繼續執行 doRead() 監聽下一次請求
+            if (self->res.keepAlive())
+            {
+                self->parser.emplace();
+                self->doRead();
+            }
+            else
+            {
+                self->close(); // 否則主動關閉 Socket 連線
+            }
+        });
+}
+```
+
+以下是連線層和 PEM 的具體實作位置。
 
 #### A-1) 連線層：TLS 偵測 + 握手
 
