@@ -41,10 +41,11 @@
 - [16) 歷史攻擊與現代預設值存在的原因](#cn-16)
 - [17) 強化檢查清單](#cn-17)
 - [18) 測試與診斷工具](#cn-18)
+- [19) 案例研究：`curl -k` 到底跳過了什麼](#cn-19)
 
 **Part 7 — 應用案例：OpenBMC bmcweb**
-- [19) 透過 Redfish 管理 PEM 憑證](#cn-19)
-- [20) bmcweb 原始碼走讀](#cn-20)
+- [20) 透過 Redfish 管理 PEM 憑證](#cn-20)
+- [21) bmcweb 原始碼走讀](#cn-21)
 
 **附錄**
 - [A) 詞彙表](#cn-a)
@@ -320,7 +321,7 @@ Leaf / server certificate (server.crt)
 
 - **Root CA** 會盡可能保持離線 — 一旦 root 私鑰外流，它曾經簽發過的每一張憑證都會變得可疑。
 - **Intermediate CA** 負責實際日常的簽署工作，因此一旦遭入侵，影響範圍只限於*該中繼憑證*簽出去的憑證，而且可以直接撤銷該中繼憑證，不需動到 root。
-- **自簽憑證（Self-signed certificates）** 沒有信任鏈 — 除了伺服器自己以外沒有人為它背書。適合用在本機開發或封閉的內部系統（例如 BMC 預設的 HTTPS 憑證，見 [§19](#cn-19)）；client 會顯示信任警告，因為它們的信任庫裡沒有任何路徑能連回這張憑證。
+- **自簽憑證（Self-signed certificates）** 沒有信任鏈 — 除了伺服器自己以外沒有人為它背書。適合用在本機開發或封閉的內部系統（例如 BMC 預設的 HTTPS 憑證，見 [§20](#cn-20)）；client 會顯示信任警告，因為它們的信任庫裡沒有任何路徑能連回這張憑證。
 
 ### Client 實際如何驗證一張憑證
 
@@ -379,7 +380,7 @@ Verify: 計算 Cert 雜湊 Hash( CertInfo || Server Public Key ) == 解密 CA �
           │  Server Certificate (server.crt)                        │
           ├─────────────────────────────────────────────────────────┤
           │  • Domain Name: *.example.com                           │
-          │  • Server Public Key (長期非對稱公鑰)                     │
+          │  • Server Public Key (長期非對稱公鑰)                    │
           │  • CA Signature = Sign(Cert Hash, CA Private Key)       │
           └─────────────────────────────────────────────────────────┘
 
@@ -388,7 +389,7 @@ Verify: 計算 Cert 雜湊 Hash( CertInfo || Server Public Key ) == 解密 CA �
 【 階段二：TLS 1.2 Handshake (身分驗證與金鑰交換) 】
 =================================================================================================================
 
-Client                                                                Server
+  Client                                                               Server
  (擁有 CA Public Key)                                                 (擁有 Server Private Key & Certificate)
   │                                                                                 │
   │ ─── 1. ClientHello ───────────────────────────────────────────────────────────> │
@@ -398,28 +399,31 @@ Client                                                                Server
   │       (ServerRandom, Selected Cipher Suite)                                     │
   │                                                                                 │
   │ <── 3. Certificate ──────────────────────────────────────────────────────────── │
+  │        CA Signature =                                                           |
+  |          E( Hash(CertInfo || Server Public Key), Server Private Key )           |
   │       (server.crt；內含 Server Public Key 與 CA Signature)                       │
   │                                                                                 │
   │ <── 4. ServerKeyExchange ────────────────────────────────────────────────────── │
-  │  ECDHE Signature = E( Hash(ClientRandom || ServerRandom || Server ECDHE PubKey) |
-  |                     , Server Private Key )                                      |
+  │        ECDHE Signature =                                                        |
+  |          E( Hash(ClientRandom || ServerRandom || Server ECDHE PubKey)           |
+  |                                                 , Server Private Key )          |
   │       (Server ECDHE PubKey + ECDHE Signature)                                   │
   │                                                                                 │
   │ <── 5. ServerHelloDone ──────────────────────────────────────────────────────── │
   │                                                                                 │
   │  [Client 驗證階段]                                                               │
   │  A. 用 CA Public Key 驗證 Certificate                                            │
-  │     → 確認憑證是 CA 簽發，且從中取出 Server Public Key                               │
-  │   1. 解密 CA 簽章： Hash_ca = Decrpt( CA Signature, CA Public Key )               │
-  │   2. 計算 Cert 雜湊： Hash_cert = Hash( CertInfo || Server Public Key )           │
-  │   3. 公式驗證：     Hash_ca  ==  Hash_cert                                        │
-  │      └──> 驗證通過：從 CertInfo 提取出 Server Public Key                           │
+  │     → 確認憑證是 CA 簽發，且從中取出 Server Public Key                             │
+  │   1. 計算 Cert 雜湊： Hash_cert = Hash( CertInfo || Server Public Key )          │
+  │   2. 解密 CA 簽章： Hash_ca = D( CA Signature, CA Public Key )                   │
+  │   3. 公式驗證：     Hash_cert == Hash_ca                                         │
+  │      └──> 驗證通過：從 CertInfo 提取出 Server Public Key                          │
   │                                                                                 │
-  │  B. 用 Server Public Key 驗證 Server ECDHE 簽章                                   │
-  │     → 證明資料未被竄改，且 Server 確實持有對應私鑰                                    │
-  │   驗證：H(ClientRandom || ServerRandom || ECDHE PubKey)                          |
-  |       == D(ECDHE Signature, Server Public Key)                                  │
-  │       └──> 驗證通過：確認 ECDHE 參數安全，且 Server 持有私鑰                          │
+  │  B. 用 Server Public Key 驗證 Server ECDHE 簽章                                  │
+  │     → 證明資料未被竄改，且 Server 確實持有對應私鑰                                 │
+  │     → 驗證 H(ClientRandom || ServerRandom || ECDHE PubKey)                      |
+  |        == D(ECDHE Signature, Server Public Key)                                 │
+  │        └──> 驗證通過：確認 ECDHE 參數安全，且 Server 持有私鑰                      │
   │                                                                                 │
   │ ─── 6. ClientKeyExchange ─────────────────────────────────────────────────────> │
   │       (Client ECDHE PubKey)                                                     │
@@ -428,10 +432,10 @@ Client                                                                Server
   │                                                                                 │
   │ <── 8. [ChangeCipherSpec] & Finished ────────────────────────────────────────── │
   │                                                                                 │
-  │  [雙方獨立算出同一把對稱金鑰]                                                       │
+  │  [雙方獨立算出同一把對稱金鑰]                                                     │
   │  Client: Compute(Client ECDHE PrivKey + Server ECDHE PubKey + Randoms)          │
   │                                                                                 │
-  │  【 Session Key / AES Key 】 <─────── 兩者一致 ────────                           │
+  │  【 Session Key / AES Key 】 <─────── 兩者一致 ────────                          │
   │                                                                                 │
   │  Server: Compute(Server ECDHE PrivKey + Client ECDHE PubKey + Randoms)          │
   │                                                                                 │
@@ -442,7 +446,7 @@ Client                                                                Server
 
   Client                                                                         Server
     │                                                                               │
-    │ === 9. HTTP / HTTPS 資料傳輸 (用【對稱金鑰 Session Key】雙向加密) ===              │
+    │ === 9. HTTP / HTTPS 資料傳輸 (用【對稱金鑰 Session Key】雙向加密) ===            │
     │                                                                               │
 ```
 
@@ -532,13 +536,13 @@ Client                                                                Server
   │       (Server ECDHE PubKey + ECDHE Signature)                                   │
   │                                                                                 │
   │ <── 4.5 CertificateRequest ───────────────────────────────────────────────────  │ <== [mTLS 補充]
-  │       (Server 要求 Client 提供憑證，可附上受信任 CA 清單)                            │
+  │       (Server 要求 Client 提供憑證，可附上受信任 CA 清單)                          │
   │                                                                                 │
   │ <── 5. ServerHelloDone ──────────────────────────────────────────────────────── │
   │                                                                                 │
   │  [Client 驗證 Server 階段]                                                       │
-  │  A. 用 CA Public Key 驗證 server.crt (取出 Server Public Key)                     │
-  │  B. 用 Server Public Key 驗證 Server ECDHE 簽章 (確認 Server 身份與參數安全)         │
+  │  A. 用 CA Public Key 驗證 server.crt (取出 Server Public Key)                    │
+  │  B. 用 Server Public Key 驗證 Server ECDHE 簽章 (確認 Server 身份與參數安全)       │
   │                                                                                 │
   │ ─── 5.5 Certificate ──────────────────────────────────────────────────────────> │ <== [mTLS 補充]
   │       (client.crt；內含 Client Public Key 與 CA Signature)                       │
@@ -547,21 +551,20 @@ Client                                                                Server
   │       (Client ECDHE PubKey)                                                     │
   │                                                                                 │
   │ ─── 6.5 CertificateVerify ───────────────────────────────────────────────────>  │ <== [mTLS 補充]
-  │       Signature = E( Hash(所有歷史 Handshake 訊息), Client Private Key )          │
+  │       Signature = E( Hash(所有歷史 Handshake 訊息), Client Private Key )         │
   │                                                                                 │
-  │                                                                                 │
-  │        [Server 驗證 Client 階段]                                                 │ <== [mTLS 補充]
-  │        A. 用 CA Public Key 驗證 client.crt → 確認憑證合法並取出【Client Public Key】 │
-  │        B. 用 Client Public Key 驗證 Client ECDHE 簽章 ((確認 Client 身份與參數安全)) │
+  │      [Server 驗證 Client 階段]                                                   │ <== [mTLS 補充]
+  │      A. 用 CA Public Key 驗證 client.crt → 確認憑證合法並取出【Client Public Key】 │
+  │      B. 用 Client Public Key 驗證 Client ECDHE 簽章 ((確認 Client 身份與參數安全)) │
   │                                                                                 │
   │ ─── 7. [ChangeCipherSpec] & Finished ─────────────────────────────────────────> │
   │                                                                                 │
   │ <── 8. [ChangeCipherSpec] & Finished ────────────────────────────────────────── │
   │                                                                                 │
-  │  [雙方獨立算出同一把對稱金鑰]                                                       │
+  │  [雙方獨立算出同一把對稱金鑰]                                                     │
   │  Client: Compute(Client ECDHE PrivKey + Server ECDHE PubKey + Randoms)          │
   │                                                                                 │
-  │  【 Session Key / AES Key 】 <─────── 兩者一致 ────────                           │
+  │  【 Session Key / AES Key 】 <─────── 兩者一致 ────────                          │
   │                                                                                 │
   │  Server: Compute(Server ECDHE PrivKey + Client ECDHE PubKey + Randoms)          │
   │                                                                                 │
@@ -572,7 +575,7 @@ Client                                                                Server
 
   Client                                                                         Server
     │                                                                               │
-    │ === 9. HTTP / HTTPS 資料傳輸 (用【對稱金鑰 Session Key】雙向加密) ===              │
+    │ === 9. HTTP / HTTPS 資料傳輸 (用【對稱金鑰 Session Key】雙向加密) ===            │
     │                                                                               │
 ```
 
@@ -600,7 +603,7 @@ MIIE....(Base64)...
 ```
 
 - 大致上可讀、可以拿去做 diff、也容易串接 — 一個 PEM「鏈」檔案其實就是好幾個 `BEGIN/END CERTIFICATE` 區塊前後相接而成
-- 單一 `.pem` 檔案也可以同時把憑證*和*它的私鑰包在一起（兩個區塊、一個檔案） — bmcweb 的 `server.pem` 就是這樣做的，見 [§20](#cn-20)
+- 單一 `.pem` 檔案也可以同時把憑證*和*它的私鑰包在一起（兩個區塊、一個檔案） — bmcweb 的 `server.pem` 就是這樣做的，見 [§21](#cn-21)
 - 常見副檔名：`.pem`、`.crt`、`.cer`、`.key` — 副檔名只是一種*慣例*，不保證內容一定如此；不確定時務必用 `openssl x509 -text` 或 `openssl pkey -text` 檢查
 
 ### DER（Distinguished Encoding Rules）
@@ -870,12 +873,12 @@ HTTP/2 / HPACK：先建立動態字典（Dynamic Table），後續只傳「差�
 
 Dynamic Table（伺服器 / client 共用）
 ------------------------------------------------
-| 索引 | 欄位名稱         | 欄位值                 |
-| 1    | :method          | GET                 |
-| 2    | :scheme          | https               |
-| 3    | :authority       | example.com         |
-| 4    | user-agent       | curl/8.0            |
-| 5    | accept           | */*                 |
+| 索引 | 欄位名稱         | 欄位值               |
+| 1    | :method          | GET                |
+| 2    | :scheme          | https              |
+| 3    | :authority       | example.com        |
+| 4    | user-agent       | curl/8.0           |
+| 5    | accept           | */*                |
 ------------------------------------------------
 
 Request 2 的 Header 其實很多都已經知道：
@@ -919,11 +922,11 @@ HTTP/2：訊息被切成二進位 frame，再交給 stream / priority / length �
 |  - Type                                                   |
 |  - Flags                                                  |
 |  - Stream ID                                              |
-+---------------------- +------------------------------------+
++---------------------- +-----------------------------------+
                        |
                        v
               +------------------+
-              | DATA / HEADERS  |
+              | DATA / HEADERS   |
               |  frame payload   |
               +------------------+
 
@@ -998,7 +1001,7 @@ QUIC Connection (Connection ID)
 -------------------------------------------------
 | Stream 1 | Stream 2 | Stream 3 | Stream 4 | 
 | HTML     | CSS      | JS       | IMG      | 
-| 可靠傳輸  | 可靠傳輸   | 可靠傳輸  | 可靠傳輸  | 
+| 可靠傳輸 | 可靠傳輸  | 可靠傳輸  | 可靠傳輸  | 
 -------------------------------------------------
 
 一個封包遺失時，只有它所屬的 stream 受影響
@@ -1094,8 +1097,8 @@ Client                                              Server
   | <- EncryptedExtensions --------------------------- |
   | <- Certificate ----------------------------------- |
   | <- CertificateVerify ----------------------------- |
-  | <- Finished -------------------------------------- |
   |                                                    |
+  | <- Finished -------------------------------------- |
   | -- Finished -------------------------------------> |
   | ====== Application Data (both directions) ======== |
 ```
@@ -1208,9 +1211,170 @@ curl -v --http3   https://host/   # requires a curl build with HTTP/3 support
 ---
 
 <a id="cn-19"></a>
-## 19) 透過 Redfish 管理 PEM 憑證
+## 19) 案例研究：`curl -k` 到底跳過了什麼
 
-以上所有內容現在套用到一個真實系統上：[openbmc/bmcweb](https://github.com/openbmc/bmcweb)，OpenBMC 系 BMC firmware 所使用的 HTTP 伺服器。本節說明面向 Redfish 的憑證管理 API；[§20](#cn-20) 則說明底層的 C++ 實作。
+`-k`（完整寫法 `--insecure`）大概是 TLS 相關旗標裡最常被誤解的一個。兩種常見的誤解是「加了 `-k` 就沒有加密」與「加了 `-k` 等於退回 HTTP」—— 兩者都不對。TLS 握手照樣從頭到尾完整跑完，流量照樣被加密，**唯一被跳過的是「驗證憑證」這一個環節**。
+
+### 按 curl 的執行順序逐步拆解
+
+以 `curl -k https://example.com/` 為例，從敲下指令到拿回應，實際發生的順序是：
+
+**1. 解析 URL、DNS 查詢** — ✅ 照做
+
+不受影響。`-k` 完全不介入名稱解析。
+
+**2. TCP 三次握手** — ✅ 照做
+
+連上 443 port（見 [§13](#cn-13)），與 `-k` 無關。
+
+**3. 送出 ClientHello** — ✅ 照做
+
+TLS 版本清單、cipher suite 清單、隨機亂數、SNI、ALPN、`supported_groups` 一項不少（見 [§7](#cn-7)）。**server 端完全看不出 client 有沒有加 `-k`** —— 這從頭到尾是純粹的 client 端行為。
+
+**4. 收到 ServerHello** — ✅ 照做
+
+TLS 版本與 cipher suite 照常協商，不會因為 `-k` 而挑到比較弱的組合。
+
+**5. 收到 Certificate 訊息** — ✅ 照做
+
+Server 照樣送出完整憑證鏈，curl 照樣完整接收並解析成 X.509 結構。`-k` 不會讓 server 少送，也不會讓 curl 不收。
+
+**6. 驗證憑證** — ❌ **跳過 ← 這是 `-k` 唯一動到的環節**
+
+正常情況下 curl 會在這一步做以下檢查，`-k` 把整組一次關掉：
+
+| 檢查項目 | 內容 |
+|---|---|
+| 鏈驗證 | 逐層用上一層的公鑰驗證簽章，一路追到 trust store 裡的 root CA（[§8](#cn-8)） |
+| 有效期限 | `notBefore` / `notAfter` 是否涵蓋目前時間 |
+| 主機名稱比對 | URL 裡的 host 是否符合憑證的 SAN（[§8](#cn-8)） |
+| 用途限制 | `basicConstraints`、`keyUsage`、`extendedKeyUsage` 是否允許此用途 |
+| 撤銷狀態 | CRL／OCSP（視 build 與設定而定） |
+
+**7. 驗證 CertificateVerify（TLS 1.3）／ServerKeyExchange（TLS 1.2）簽章** — ✅ **照做**
+
+這點最常被誤會。curl 依然會用憑證裡的公鑰驗證這個簽章，確認對方**真的持有該憑證對應的私鑰**（見 [§9](#cn-9)）。被跳過的只是「這張憑證值不值得信任」，而不是「對方是否持有它的私鑰」。
+
+**8. ECDHE 金鑰交換** — ✅ 照做
+
+雙方照常各自算出共享密鑰，PFS 一樣成立（見 [§6](#cn-6)）。
+
+**9. Finished 訊息交換** — ✅ 照做
+
+雙方比對握手 transcript 的雜湊，確認整個握手過程沒有被竄改。
+
+**10. Application Data** — ✅ 照做
+
+以協商好的 AEAD 演算法加密，機密性與完整性都在。
+
+### 實測驗證
+
+對一台自簽憑證的伺服器下 `curl -kv`，握手訊息一項不缺：
+
+```text
+* ALPN, offering h2
+* TLSv1.3 (OUT), TLS handshake, Client hello (1):
+* TLSv1.3 (IN),  TLS handshake, Server hello (2):
+* TLSv1.3 (IN),  TLS handshake, Certificate (11):      <- 憑證照收
+* TLSv1.3 (IN),  TLS handshake, CERT verify (15):      <- 簽章照驗
+* TLSv1.3 (IN),  TLS handshake, Finished (20):
+* SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384
+```
+
+更有意思的是，curl 其實**照算了驗證結果，只是不理會它**：
+
+```bash
+curl -k -o /dev/null -s -w "verify_result=%{ssl_verify_result}\n" https://self-signed.host/
+# verify_result=18     <- 18 = X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT
+```
+
+驗證失敗的代碼 `18` 依然被算出來並回報，只是 `-k` 讓 curl 不把它當成中止連線的理由。
+
+### `-k` 其實一次關掉了兩個獨立的開關
+
+在 libcurl 層面這是兩個彼此獨立的選項：
+
+| 選項 | 負責的檢查 | `-k` 的效果 |
+|---|---|---|
+| `CURLOPT_SSL_VERIFYPEER` | 憑證鏈是否連回可信 CA | 設為 `0` |
+| `CURLOPT_SSL_VERIFYHOST` | 主機名稱是否符合 SAN | 設為 `0` |
+
+命令列上沒辦法只關掉其中一個 —— `-k` 是全有全無。若問題只是主機名稱對不上，正確做法是用 `--resolve` 而不是 `-k`（見下方）。
+
+### 威脅模型：擋得住誰、擋不住誰
+
+```text
+被動竊聽者（只能側錄封包，無法改動流量）
+
+  Client <════════════ 加密 ════════════> Server
+                  ^ 攻擊者只看得到密文
+  → -k 仍然完全防得住
+
+主動攻擊者（可改路由／ARP spoofing／控制中間節點）
+
+  Client <═══ 加密 ═══> [MITM] <═══ 加密 ═══> Server
+                  ^ 兩段都是貨真價實的 TLS
+                  ^ 但兩段的 session key 都在 MITM 手上，明文全看得見
+  → -k 等於毫無防護
+```
+
+攻擊者只要自己生一把私鑰、簽一張自簽憑證，`-k` 就會照單全收（見 [§8](#cn-8)）。你得到的會是一條加密得無懈可擊、卻通往攻擊者的通道。
+
+一句話對照兩者的保證強度：
+
+- **有 `-k`**：「我跟*某個*持有這張憑證私鑰的對象建立了加密通道。」
+- **無 `-k`**：「……而且那個對象確實是 `example.com`，並且有我信任的 CA 為他背書。」
+
+### 三種常見的驗證失敗與對應解法
+
+`-k` 能讓以下錯誤全部消失，但每一種其實都有更精確的解法：
+
+```bash
+# 症狀 1：自簽憑證，或由私有 CA 簽發、trust store 裡沒有
+curl: (60) SSL certificate problem: self-signed certificate
+# 解法：明確指定要信任的 CA，而不是關掉驗證
+curl --cacert ca.crt https://host/
+curl --cacert server.crt https://host/     # 自簽：直接信任該張憑證本身
+
+# 症狀 2：CA 沒問題，但用 IP 連線導致主機名稱對不上
+curl: (60) SSL: no alternative certificate subject name matches target host name '192.168.1.100'
+# 解法：保留完整鏈驗證，只把名稱指向該 IP
+curl --cacert ca.crt --resolve host.example:443:192.168.1.100 https://host.example/
+
+# 症狀 3：憑證過期
+curl: (60) SSL certificate problem: certificate has expired
+# 解法：換一張新憑證。這是真正的問題，不該用旗標繞過
+```
+
+若連 CA 憑證都拿不到，還可以退而求其次改用公鑰釘選（pinning）—— 雖然不驗證信任鏈，但至少綁定了特定一把金鑰：
+
+```bash
+# 先算出憑證公鑰的 SHA-256 指紋
+openssl x509 -in server.crt -pubkey -noout \
+  | openssl pkey -pubin -outform der \
+  | openssl dgst -sha256 -binary | base64
+
+curl --pinnedpubkey "sha256//<上面算出的值>" https://host/
+```
+
+### 什麼時候可以用、什麼時候不行
+
+| 情境 | 建議 |
+|---|---|
+| 本機開發，用自己剛 `openssl req -x509` 生的憑證 | ✅ 可接受 |
+| 隔離管理網段上，BMC 出廠自簽憑證的初次設定（[§20](#cn-20)） | ✅ 可接受 |
+| 除錯時要先確認「究竟是憑證問題還是其他問題」 | ✅ 可接受（先用 `-k` 確認連得上，再回頭修驗證） |
+| 正式環境的自動化腳本、CI/CD | ❌ 應改用 `--cacert` |
+| 任何跨越不受控網路的連線 | ❌ 等同毫無防護 |
+
+這也解釋了為什麼 [§20](#cn-20) 裡的 Redfish 範例指令都帶著 `-k`：BMC 出廠是自簽憑證（[§8](#cn-8)），client 的 trust store 裡本來就沒有任何路徑能連回它，而且這類操作通常發生在隔離的管理網段上。一旦透過 Redfish 換上由企業內部 CA 簽發的正式憑證，就應該把 `-k` 換成 `--cacert`。
+
+---
+
+<a id="cn-20"></a>
+## 20) 透過 Redfish 管理 PEM 憑證
+
+以上所有內容現在套用到一個真實系統上：[openbmc/bmcweb](https://github.com/openbmc/bmcweb)，OpenBMC 系 BMC firmware 所使用的 HTTP 伺服器。本節說明面向 Redfish 的憑證管理 API；[§21](#cn-21) 則說明底層的 C++ 實作。
 
 這對應到 bmcweb 的 `redfish-core/lib/certificate_service.hpp`：
 
@@ -1298,18 +1462,18 @@ openssl s_client -connect <bmc>:443 -servername <bmc> </dev/null 2>/dev/null | o
 
 ---
 
-<a id="cn-20"></a>
-## 20) bmcweb 原始碼走讀
+<a id="cn-21"></a>
+## 21) bmcweb 原始碼走讀
 
-原始碼：[github.com/openbmc/bmcweb](https://github.com/openbmc/bmcweb)（`main` 分支）。以下為程式碼庫中，將網路連線、TLS 握手、HTTP 路由與業務邏輯以 C++ 搭配 **Boost.Asio / Boost.Beast** 實作說明的完整走讀。
+原始碼：[github.com/openbmc/bmcweb](https://github.com/openbmc/bmcweb)（`master` 分支）。以下為程式碼庫中，將網路連線、TLS 握手、HTTP 路由與業務邏輯以 C++ 搭配 **Boost.Asio / Boost.Beast** 實作說明的完整走讀。
 
 ---
 
-### A. TLS 實作：連線層 vs PEM 載入 vs 業務 Router
+### 架構總覽
 
-`http/http_connection.hpp` **不會**直接解析 PEM 憑證檔 — 它僅處理連線層級的 TLS 流程（偵測是否為 SSL、握手、ALPN 路由）。PEM 載入是在 SSL Context 初始化階段進行，位於 `src/ssl_key_handler.cpp`。
+`http/http_connection.hpp` **不會**直接解析 PEM 憑證檔 — 它僅處理連線層級的 TLS 流程（偵測是否為 SSL、握手、ALPN 路由）。PEM 載入是在伺服器啟動時的 SSL Context 初始化階段進行，位於 `src/ssl_key_handler.cpp`（見下方階段 0）。
 
-在架構設計上，**業務 Handler（Business Handler）與連線層（Connection Layer）已完全解耦**。完整的分層設計如下：
+業務 Handler（Business Handler）與連線層（Connection Layer）是分開的兩層，中間透過 Router 轉接：
 
 ```text
 [ Socket 物理層 ] (TCP / TLS Socket)
@@ -1321,136 +1485,339 @@ openssl s_client -connect <bmc>:443 -servername <bmc> </dev/null 2>/dev/null | o
 [ 業務邏輯層   ] redfish-core/lib/*.hpp (handleXxxGet / handleXxxPost)
        ↓
 [ 系統服務層   ] D-Bus Call / DB / Custom Logic
-
 ```
 
-### B. 端到端（End-to-End）完整請求生命週期
+### 完整請求生命週期
 
-一個 HTTP/HTTPS 請求從「TCP/TLS Socket 建立」**到**「Response 寫回 Socket」的完整流程如下：
+一個 HTTP/HTTPS 請求從「TCP/TLS Socket 建立」**到**「Response 寫回 Socket」的完整流程如下（階段編號對應下方逐段剖析）：
 
 ```text
+[伺服器啟動一次]
+  0. 載入 PEM 憑證，建立 SSL Context (http_server.hpp: loadCertificate -> ssl_key_handler.cpp: getSslServerContext)
+
+[每個連線 / 每個請求]
 [SOCKET START]
-  1. Boost.Asio Server Acceptor (http/http_server.hpp: doAccept)
+  1. Boost.Asio Server Acceptor (http_server.hpp: doAcceptOne -> afterAccept -> Connection::start)
      ↓
-  2. TLS 握手與資料讀取 (http/http_connection.hpp: start -> async_handshake -> doRead)
+  2. TLS 偵測、握手與 ALPN 協商 (http_connection.hpp: start -> async_detect_ssl -> afterDetectSsl -> [async_handshake -> afterSslHandshake])
+     │
+     ├── ALPN 選中 h2 -> upgradeToHttp2()，之後改走文末「旁支：HTTP/2」
+     │
+     ↓ (明文 HTTP，或 TLS 但沒選 h2)
+  3. HTTP Header 讀取 (http_connection.hpp: doReadHeaders -> afterReadHeaders -> handle)
      ↓
-  3. HTTP Request 解析完成 (http/http_connection.hpp: afterReadHeaders -> handle)
+  4. handle()：版本檢查、Keep-Alive、認證、Upgrade 檢查 (http_connection.hpp: handle -> doUpgrade)
+     ↓ (一般請求)
+  5. 路由匹配、權限檢查與分派 (routing.hpp: Router::handle -> validatePrivilege -> rule.handle)
      ↓
-  4. 路由匹配與分派 (http/routing.hpp: Router::handle -> rule.handle)
-     ↓
-  5. 執行 Redfish 業務邏輯 (redfish-core/lib/*.hpp: handleXxx -> 非同步 D-Bus Async I/O)
+  6. 執行 Redfish 業務邏輯 (redfish-core/lib/*.hpp: handleXxx -> 非同步 D-Bus Async I/O)
      ↓
 [BUSINESS LOGIC COMPLETED]
-  6. AsyncResp 引用計數歸零解構 (include/async_resp.hpp: ~AsyncResp -> res.end)
+  7. AsyncResp 引用計數歸零解構 (async_resp.hpp: ~AsyncResp -> res.end)
      ↓
-  7. 觸發請求完成 Callback (http/http_connection.hpp: completeRequest)
+  8. 觸發請求完成 Callback，補 Security Headers (http_connection.hpp: completeRequest -> completeResponseFields -> addSecurityHeaders)
      ↓
-  8. 物理封包寫回 Socket (http/http_connection.hpp: doWrite -> boost::beast::http::async_write)
+  9. 物理封包寫回 Socket (http_connection.hpp: doWrite -> boost::beast::async_write -> afterDoWrite)
+     │
+     └── Keep-Alive -> 回到步驟 3 繼續讀下一筆請求；否則 gracefulClose()
 [SOCKET END]
-
 ```
 
-### C. 核心原始碼逐段剖析
+### 逐段原始碼剖析
 
-#### 【階段 1】建立 Listen 與 Accept 新連線
+#### 階段 0：伺服器啟動 — 載入 PEM 憑證
 
-* **檔案位置：** `http/http_server.hpp`
-* **說明：** bmcweb 啟動時會建立 `boost::asio::ip::tcp::acceptor`。當收到新 TCP 連線時，會實例化 `Connection` 物件並呼叫 `start()`。
+* **檔案位置：** `http/http_server.hpp`（`loadCertificate`），`src/ssl_key_handler.cpp`（其餘）
+* **說明：** bmcweb 啟動時（以及收到 `SIGHUP` 時）會呼叫一次 `loadCertificate()`，準備並驗證 `/etc/ssl/certs/https/server.pem` — 這是單一合併的 PEM 檔，同時包含憑證與金鑰，正是 [§10](#cn-10) 提到的格式之一。PEM 資料透過 `use_certificate_chain` 與 `use_private_key(..., pem)` 載入，對應到命令列的 `openssl x509`／`openssl pkey`。這一步也會把 ALPN 的伺服器端 callback（`alpnSelectProtoCallback`，階段 2 會用到）註冊進 SSL Context。
 
 ```cpp
 // http/http_server.hpp
-void doAccept()
+void loadCertificate()
 {
-    acceptor->async_accept(
-        *httpStream, [this, httpStream](const boost::system::error_code& ec) {
-            if (!ec)
-            {
-                // 建立 Connection 物件實例並啟動連線處理
-                std::make_shared<Connection<Adaptor, Handler>>(
-                    handler, std::move(*httpStream), sslContext)
-                    ->start();
-            }
-            doAccept();
-        });
+    if constexpr (BMCWEB_INSECURE_DISABLE_SSL)
+    {
+        return;
+    }
+    adaptorCtx = ensuressl::getSslServerContext();
 }
 ```
 
-#### 【階段 2】TLS Handshake 與位元流讀取
+```cpp
+// src/ssl_key_handler.cpp
+std::shared_ptr<boost::asio::ssl::context> getSslServerContext()
+{
+    boost::asio::ssl::context sslCtx(boost::asio::ssl::context::tls_server);
 
-* **檔案位置：** `http/http_connection.hpp`
-* **說明：** 若啟用 TLS，連線啟動時會透過 Boost.Asio 執行 `async_handshake`。握手成功後進入 `doRead()` 循環讀取 Socket 位元組，直到 HTTP Header 讀取完畢後觸發 `afterReadHeaders()`。
+    auto certFile = ensureCertificate();
+    if (!getSslContext(sslCtx, certFile))
+    {
+        BMCWEB_LOG_CRITICAL("Couldn't get server context");
+        return nullptr;
+    }
+    ...
+    if constexpr (BMCWEB_HTTP2)
+    {
+        SSL_CTX_set_alpn_select_cb(sslCtx.native_handle(),
+                                   alpnSelectProtoCallback, nullptr);
+    }
+    ...
+}
+
+static bool getSslContext(boost::asio::ssl::context& mSslContext,
+                          const std::string& sslPemFile)
+{
+    ...
+    boost::asio::const_buffer buf(sslPemFile.data(), sslPemFile.size());
+    mSslContext.use_certificate_chain(buf, ec);
+    ...
+    mSslContext.use_private_key(buf, boost::asio::ssl::context::pem, ec);
+    ...
+}
+
+static std::string ensureCertificate()
+{
+    ...
+    fs::path certFile = certPath / "server.pem";  // certPath = "/etc/ssl/certs/https/"
+    ...
+    return ensuressl::ensureOpensslKeyPresentAndValid(sslPemFile);
+}
+```
+
+---
+
+#### 階段 1：建立 Listen 與 Accept 新連線
+
+* **檔案位置：** `http/http_server.hpp`
+* **說明：** bmcweb 啟動時會建立 `boost::asio::ip::tcp::acceptor`。當收到新 TCP 連線時，`afterAccept()` 會實例化 `Connection` 物件，並透過 `boost::asio::post` 把 `start()` 排入 io_context 執行。
+
+```cpp
+// http/http_server.hpp
+void doAcceptOne(Acceptor& acceptor)
+{
+    SocketPtr socket = std::make_unique<Adaptor>(getIoContext());
+    Adaptor* socketPtr = socket.get();
+    acceptor.acceptor.async_accept(
+        *socketPtr, std::bind_front(&self_t::afterAccept, this, &acceptor,
+                                    std::move(socket), acceptor.httpType));
+}
+
+void afterAccept(Acceptor* acceptor, SocketPtr socket, HttpType httpType,
+                 const boost::system::error_code& ec)
+{
+    if (ec) { return; }
+
+    boost::asio::ssl::stream<Adaptor> stream(std::move(*socket), *adaptorCtx);
+    auto connection = std::make_shared<Connection<Adaptor, Handler>>(
+        handler, httpType, std::move(timer), getCachedDateStr,
+        std::move(stream));
+
+    boost::asio::post(getIoContext(), [connection] { connection->start(); });
+    doAcceptOne(*acceptor);
+}
+```
+
+---
+
+#### 階段 2：TLS 偵測、握手與 ALPN 協商
+
+* **檔案位置：** `http/http_connection.hpp`（ALPN callback 在 `src/ssl_key_handler.cpp`）
+* **說明：** `start()` 先用 `async_detect_ssl` 判斷連線是明文還是 TLS；是 TLS 才執行 `async_handshake`。握手完成後，若啟用 HTTP/2，`afterSslHandshake()` 會檢查 ALPN 協商結果：選中 `h2` 就直接呼叫 `upgradeToHttp2()` 切到 HTTP/2（見文末「旁支：HTTP/2」）；否則呼叫 `doReadHeaders()` 進入階段 3。
 
 ```cpp
 // http/http_connection.hpp
 void start()
 {
-    if constexpr (std::is_same_v<Adaptor, boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>)
+    readClientIp();
+    /* connectionCount 上限檢查、mTLS 準備（若啟用）省略 */
+    startDeadline(DeadlineTimerType::Default);
+
+    boost::beast::async_detect_ssl(
+        adaptor.next_layer(), buffer,
+        std::bind_front(&self_type::afterDetectSsl, this,
+                        shared_from_this()));
+}
+
+void afterDetectSsl(const std::shared_ptr<self_type>& /*self*/,
+                    boost::beast::error_code ec, bool isTls)
+{
+    if (ec) { return; }
+
+    if (isTls)
     {
-        // 執行 TLS 握手
+        httpType = HttpType::HTTPS;
         adaptor.async_handshake(
-            boost::asio::ssl::stream_base::server,
-            [self(shared_from_this())](const boost::system::error_code& ec) {
-                if (!ec) { self->doRead(); }
-            });
+            boost::asio::ssl::stream_base::server, buffer.data(),
+            std::bind_front(&self_type::afterSslHandshake, this,
+                            shared_from_this()));
     }
-    else 
-    { 
-        doRead(); 
+    else
+    {
+        httpType = HttpType::HTTP;
+        doReadHeaders();  // 明文 HTTP：直接進入階段 3
     }
 }
 
-void doRead()
+void afterSslHandshake(const std::shared_ptr<self_type>& /*self*/,
+                       const boost::system::error_code& ec,
+                       size_t bytesParsed)
 {
-    // 透過 Boost.Beast 讀取 HTTP Request Header
+    buffer.consume(bytesParsed);
+    if (ec) { return; }  // 握手失敗：不主動 close，交給 deadline timer 逾時收尾
+
+    /* mTLS session 建立（若啟用）省略 */
+
+    if constexpr (BMCWEB_HTTP2)
+    {
+        const unsigned char* alpn = nullptr;
+        unsigned int alpnlen = 0;
+        SSL_get0_alpn_selected(adaptor.native_handle(), &alpn, &alpnlen);
+        if (alpn != nullptr)
+        {
+            std::string_view selectedProtocol(
+                std::bit_cast<const char*>(alpn), alpnlen);
+            if (selectedProtocol == "h2")
+            {
+                upgradeToHttp2();  // -> 旁支：HTTP/2
+                return;
+            }
+        }
+    }
+
+    doReadHeaders();  // 沒選 h2：進入階段 3
+}
+```
+
+伺服器端實際「選」ALPN 協定的地方，是階段 0 註冊給 OpenSSL 的 callback：
+
+```cpp
+// src/ssl_key_handler.cpp
+static int alpnSelectProtoCallback(
+    SSL* /*unused*/, const unsigned char** out, unsigned char* outlen,
+    const unsigned char* in, unsigned int inlen, void* /*unused*/)
+{
+    int rv = nghttp2_select_alpn(out, outlen, in, inlen);
+    if (rv == -1)
+    {
+        return SSL_TLSEXT_ERR_NOACK;
+    }
+    if (rv == 1)
+    {
+        BMCWEB_LOG_DEBUG("Selected HTTP2");
+    }
+    return SSL_TLSEXT_ERR_OK;
+}
+```
+
+這是 [§7](#cn-7) 提到的 ALPN 協商、[§13](#cn-13) 「先 TCP 再 TLS」示意圖，以及 [§9](#cn-9) 非阻塞式握手，三者在實際程式碼中的落地版本：client 若在 `ClientHello` 提供 `h2`，nghttp2 就會替 OpenSSL 選中它；握手一結束，`afterSslHandshake()` 立刻讀出這個結果決定分流方向。
+
+---
+
+#### 階段 3：HTTP Header 讀取
+
+* **檔案位置：** `http/http_connection.hpp`
+* **說明：** `doReadHeaders()` 透過 Boost.Beast 讀取 HTTP Header；讀完後 `afterReadHeaders()` 判斷 header 是否已解析完畢，完畢就呼叫 `handle()` 進入階段 4，否則呼叫 `doRead()`（透過 `async_read_some` 繼續讀 body）。
+
+```cpp
+// http/http_connection.hpp
+void doReadHeaders()
+{
     boost::beast::http::async_read_header(
         adaptor, buffer, *parser,
-        [self(shared_from_this())](const boost::system::error_code& ec, std::size_t bytesTransferred) {
-            self->afterReadHeaders(self, ec, bytesTransferred);
-        });
+        std::bind_front(&self_type::afterReadHeaders, this,
+                        shared_from_this()));
 }
 
 void afterReadHeaders(const std::shared_ptr<self_type>& /*self*/,
                       const boost::system::error_code& ec,
                       std::size_t bytesTransferred)
 {
-    /* 身份驗證、 Header 格式檢查等 */
-    if (parser->is_done())
+    /* 身份驗證、Content-Length 檢查等省略 */
+    if (parse.is_done())
     {
-        handle();  // 標頭解析完成，進入業務邏輯分派
+        handle();  // 標頭解析完成，進入階段 4
         return;
     }
-    doRead();
+    doRead();  // 還有 body 待讀，doRead() 透過 async_read_some 繼續讀取
 }
 ```
 
-#### 【階段 3】連線層 → 路由層交接
+---
+
+#### 階段 4：handle() — 版本檢查、Keep-Alive、認證與 Upgrade 檢查
 
 * **檔案位置：** `http/http_connection.hpp`
-* **說明：** 建立 `AsyncResp` 傳送物件，並將 `completeRequest` 註冊為 Response 完成時的回呼函式，最後將 Request 丟給 Router 處理。
+* **說明：** `handle()` 先做 HTTP/1.1 的 `Host` header 檢查，並讀出 `keepAlive`（[§12](#cn-12) 提到的 HTTP/1.0 vs 1.1 差異，就是靠這裡的 `req->version()`／`req->keepAlive()`，而不是兩套獨立程式碼路徑）；接著做認證檢查，建立 `AsyncResp` 並註冊 `completeRequest` 為完成回呼；`doUpgrade()` 檢查這個請求是不是要切到 WebSocket / SSE，是的話直接交給 `handler->handleUpgrade()` 並回傳 `true`（`handle()` 就此 return）；都不是的話才把請求交給 Router（階段 5）。
 
 ```cpp
 // http/http_connection.hpp
 void handle()
 {
+    req = std::make_shared<Request>(parser->release(), reqEc);
+    /* reqEc 錯誤處理省略 */
+
+    // Check for HTTP version 1.1.
+    if (req->version() == 11)
+    {
+        if (req->getHeaderValue(field::host).empty())
+        {
+            res.result(boost::beast::http::status::bad_request);
+            completeRequest(res);
+            return;
+        }
+    }
+
+    keepAlive = req->keepAlive();
+
+    if (authenticationEnabled)
+    {
+        /* 未登入且不在 allowlist 上 -> sendUnauthorized + completeRequest + return */
+    }
+
     auto asyncResp = std::make_shared<bmcweb::AsyncResp>();
     asyncResp->res.setCompleteRequestHandler(
         [self(shared_from_this())](Response& thisRes) {
-            self->completeRequest(thisRes);  // 當 Response 完成時回傳連線層
+            self->completeRequest(thisRes);
         });
-    
-    if (doUpgrade(asyncResp))  // WebSocket / HTTP2 Upgrade 檢查
+
+    if (doUpgrade(asyncResp))  // WebSocket / SSE / h2c 檢查
     {
         return;
     }
-    
-    handler->handle(req, asyncResp);  // 傳遞給 Router 進行匹配
+
+    handler->handle(req, asyncResp);  // 交給 Router，見階段 5
 }
 ```
 
-#### 【階段 4】路由分派 (Router)
+`doUpgrade()` 裡還有一段 h2c 分支，值得特別注意它的行為：
+
+```cpp
+// http/http_connection.hpp（doUpgrade 節錄）
+if (BMCWEB_HTTP2 && isH2c)
+{
+    std::string_view base64settings = req->req["HTTP2-Settings"];
+    if (utility::base64Decode<true>(base64settings, http2settings))
+    {
+        res.result(boost::beast::http::status::switching_protocols);
+        res.addHeader(boost::beast::http::field::connection, "Upgrade");
+        res.addHeader(boost::beast::http::field::upgrade, "h2c");
+    }
+}
+// websocket and SSE are only allowed on GET
+if (req->req.method() == boost::beast::http::verb::get)
+{
+    if (isWebsocket || isSse) { ...; return true; }
+}
+return false;
+```
+
+注意：這裡的 `res` 是 **Connection 自己的成員**（不是 `asyncResp->res`）。也就是說，偵測到 `Upgrade: h2c` 時，`doUpgrade()` 只是把 Connection 的 `res` 標成 `101 Switching Protocols` 並加上對應 headers，但函式本身仍然回傳 `false`——所以同一個請求接下來還是會被 `handler->handle(req, asyncResp)` 正常路由一次。要等到這個（被 Router 處理過的）回應真的流回 `completeRequest()` 並寫到 Socket 時，`afterDoWrite()`（見階段 9）才會檢查 `res.result()` 是不是 `switching_protocols`，是的話才呼叫 `upgradeToHttp2()` 切換連線。換句話說，h2c 能不能真的切換成功，取決於最後寫回的 `res` 有沒有保留住這個 101 狀態——這點從程式碼本身不容易一眼看穿，讀者若要深究建議實際抓包驗證。（[§12](#cn-12) 也提到，沒有任何主流瀏覽器真的會在明文連線上嘗試 h2c，這條路徑主要是為非瀏覽器 client 準備的。）
+
+---
+
+#### 階段 5：路由分派與權限檢查
 
 * **檔案位置：** `http/routing.hpp`
-* **說明：** `Router::handle()` 根據 URL Path 與 HTTP Method 尋找匹配的 Rule，並轉發給對應的業務 Handler。
+* **說明：** `Router::handle()` 根據 URL Path 與 HTTP Method 尋找匹配的 Rule；若請求已附帶 session，會先呼叫 `validatePrivilege()` 做權限檢查，通過後才轉發給對應的業務 Handler。
 
 ```cpp
 // http/routing.hpp
@@ -1458,25 +1825,36 @@ void handle(const std::shared_ptr<Request>& req,
             const std::shared_ptr<bmcweb::AsyncResp>& asyncResp)
 {
     FindRouteResponse foundRoute = findRoute(*req);
-    
+
     if (foundRoute.route.rule == nullptr)
     {
-        // 404 Not Found 或 405 Method Not Allowed 處理
+        // 找不到路由：再嘗試專屬的 404 / 405 route，最後才回應對應狀態碼
         asyncResp->res.result(boost::beast::http::status::not_found);
         return;
     }
-    
+
     BaseRule& rule = *foundRoute.route.rule;
     std::vector<std::string> params = std::move(foundRoute.route.params);
-    
+
     BMCWEB_LOG_DEBUG("Matched rule '{}' {} / {}", rule.rule,
                      req->methodString(), rule.getMethods());
-    
-    rule.handle(*req, asyncResp, params);  // 呼叫具體的業務 Handler
+
+    if (req->session == nullptr)
+    {
+        rule.handle(*req, asyncResp, params);  // 呼叫具體的業務 Handler
+        return;
+    }
+    // 已登入 session：先做 privilege 檢查，通過後才呼叫 Handler
+    validatePrivilege(req, asyncResp, rule,
+                      [req, asyncResp, &rule, params = std::move(params)]() {
+                          rule.handle(*req, asyncResp, params);
+                      });
 }
 ```
 
-#### 【階段 5】執行業務 Handler 與 RAII 機制
+---
+
+#### 階段 6：執行業務 Handler 與 AsyncResp 的 RAII 機制
 
 * **檔案位置：** `redfish-core/lib/service_root.hpp` 與 `include/async_resp.hpp`
 * **說明：** 業務邏輯層（如 Redfish API）進行 D-Bus 呼叫並填寫 JSON 回應。`AsyncResp` 採用 **RAII 技術**，當非同步呼叫全部結束、`AsyncResp` 引用計數歸零解構時，會觸發 `res.end()`。
@@ -1491,17 +1869,20 @@ inline void handleServiceRootGet(
     {
         return;
     }
-    
-    // 填寫 JSON 回應資料（亦可能在此發起非同步 D-Bus 請求）
-    asyncResp->res.jsonValue["@odata.type"] = "#ServiceRoot.v1_13_0.ServiceRoot";
-    
+
+    // 實際填寫 JSON 回應資料的邏輯在 handleServiceRootGetImpl() 裡
+    // （亦可能在此發起非同步 D-Bus 請求）
+    handleServiceRootGetImpl(asyncResp);
+
     // 當函式結束且非同步 D-Bus Callback 皆完成時，shared_ptr<AsyncResp> 解構
 }
 
 // include/async_resp.hpp
-struct AsyncResp
+class AsyncResp
 {
+  public:
     crow::Response res;
+
     ~AsyncResp()
     {
         // 當 AsyncResp 引用計數歸零，解構子自動觸發 res.end()
@@ -1513,342 +1894,108 @@ struct AsyncResp
 
 ---
 
-#### 【階段 6】標頭補全 (Complete Request)
+#### 階段 7：completeRequest — 補齊 Security Headers
 
-* **檔案位置：** `http/http_connection.hpp`
-* **說明：** 當 `res.end()` 被觸發後，流程回到連線層的 `completeRequest()`，為 Response 補上 Security Headers 與 HTTP 狀態。
+* **檔案位置：** `http/http_connection.hpp`（`addSecurityHeaders` 實際定義於 `include/security_headers.hpp`）
+* **說明：** 當 `res.end()` 被觸發後，流程回到連線層的 `completeRequest()`。它呼叫 `completeResponseFields()`（`http/complete_response_fields.hpp`），這個函式內部才會呼叫 `addSecurityHeaders(res)` 補上 Security Headers。
 
 ```cpp
 // http/http_connection.hpp
 void completeRequest(Response& thisRes)
 {
-    // 補齊 HTTP 安全標頭 (Security Headers) 與 Content-Type 等
-    addSecurityHeaders(*req, thisRes);
-    
-    // 設定 Keep-Alive 狀態
-    res.keepAlive(req->keepAlive());
-    
-    // 進入物理封包發送階段
+    res = std::move(thisRes);
+    res.keepAlive(keepAlive);
+
+    // 內部會呼叫 addSecurityHeaders(res) 等補上 Security Headers
+    completeResponseFields(accept, acceptEncoding, res);
+    res.addHeader(boost::beast::http::field::date, getCachedDateStr());
+
     doWrite();
 }
-
 ```
 
 ---
 
-#### 【階段 7】將 Response 寫回 Socket (True End)
+#### 階段 8：doWrite / afterDoWrite — 寫回 Socket
 
 * **檔案位置：** `http/http_connection.hpp`
-* **說明：** 透過 Boost.Beast 的 `async_write` 將完裝好的 HTTP Response 透過 TLS/TCP Stream 寫回 Client。若連線為 Keep-Alive 則清空 Parser 並重置連線準備讀取下一筆 Request，否則調用 `close()` 關閉 Socket。
+* **說明：** `doWrite()` 把 `res` 包成 `boost::beast::http::message_generator`，透過 `boost::beast::async_write`（不是 `http::async_write`）寫回 Socket/TLS Adaptor。寫入完成後，`afterDoWrite()` 才是真正決定下一步的地方：若剛寫回的 `res` 狀態是 `switching_protocols`（見階段 4 的 h2c 討論），就呼叫 `upgradeToHttp2()`；若是 Keep-Alive，就重置 Parser 回到階段 3 繼續讀；否則關閉連線。
 
 ```cpp
 // http/http_connection.hpp
 void doWrite()
 {
-    // 透過 Boost.Beast 將 HTTP Response 寫回 Socket/TLS Adaptor
-    boost::beast::http::async_write(
-        adaptor, res.stringResponse().value(),
-        [self(shared_from_this())](const boost::system::error_code& ec, std::size_t bytesTransferred) {
-            if (ec) { return; }
-            
-            // 若為 Keep-Alive 連線，重置 Parser 並繼續執行 doRead() 監聽下一次請求
-            if (self->res.keepAlive())
-            {
-                self->parser.emplace();
-                self->doRead();
-            }
-            else
-            {
-                self->close(); // 否則主動關閉 Socket 連線
-            }
-        });
+    res.preparePayload(urlView);
+    boost::beast::async_write(
+        adaptor,
+        boost::beast::http::message_generator(std::move(res.response)),
+        std::bind_front(&self_type::afterDoWrite, this, shared_from_this()));
 }
-```
 
-以下是連線層和 PEM 的具體實作位置。
-
-#### A-1) 連線層：TLS 偵測 + 握手
-
-原始碼：`http/http_connection.hpp`
-
-```cpp
-void start()
+void afterDoWrite(const std::shared_ptr<self_type>& /*self*/,
+                  const boost::system::error_code& ec,
+                  std::size_t /*bytesTransferred*/)
 {
-  ...
-  readClientIp();
-  boost::beast::async_detect_ssl(
-      adaptor.next_layer(), buffer,
-      std::bind_front(&self_type::afterDetectSsl, this,
-                      shared_from_this()));
-}
-```
+    if (ec) { return; }
 
-```cpp
-void afterDetectSsl(const std::shared_ptr<self_type>& /*self*/,
-                    boost::beast::error_code ec, bool isTls)
-{
-  ...
-  if (isTls)
-  {
-    httpType = HttpType::HTTPS;
-    adaptor.async_handshake(
-        boost::asio::ssl::stream_base::server, buffer.data(),
-        std::bind_front(&self_type::afterSslHandshake, this,
-                        shared_from_this()));
-  }
-  else
-  {
-    httpType = HttpType::HTTP;
-    doReadHeaders();
-  }
-}
-```
-
-```cpp
-void afterSslHandshake(const std::shared_ptr<self_type>& /*self*/,
-                       const boost::system::error_code& ec,
-                       size_t bytesParsed)
-{
-  buffer.consume(bytesParsed);
-  if (ec)
-  {
-    BMCWEB_LOG_WARNING("{} SSL handshake failed", logPtr(this));
-    return;
-  }
-  BMCWEB_LOG_DEBUG("{} SSL handshake succeeded", logPtr(this));
-  ...
-}
-```
-
-這正是 [§13](#cn-13) 那張「先 TCP 再 TLS」圖示的實際落地版本：新連線進來會先跑 `async_detect_ssl` 來分辨是 TLS 還是明文，如果是 TLS，就執行 [§9](#cn-9) 中觀念性介紹過的非阻塞式握手。
-
-#### A-2) PEM 載入：建立 SSL Context
-
-原始碼：`http/http_server.hpp`
-
-```cpp
-void loadCertificate()
-{
-  if constexpr (BMCWEB_INSECURE_DISABLE_SSL)
-  {
-    return;
-  }
-
-  adaptorCtx = ensuressl::getSslServerContext();
-}
-```
-
-原始碼：`src/ssl_key_handler.cpp`
-
-```cpp
-std::shared_ptr<boost::asio::ssl::context> getSslServerContext()
-{
-  boost::asio::ssl::context sslCtx(boost::asio::ssl::context::tls_server);
-
-  auto certFile = ensureCertificate();
-  if (!getSslContext(sslCtx, certFile))
-  {
-    BMCWEB_LOG_CRITICAL("Couldn't get server context");
-    return nullptr;
-  }
-  ...
-}
-```
-
-```cpp
-static bool getSslContext(boost::asio::ssl::context& mSslContext,
-              const std::string& sslPemFile)
-{
-  ...
-  if (!sslPemFile.empty())
-  {
-    boost::asio::const_buffer buf(sslPemFile.data(), sslPemFile.size());
-    mSslContext.use_certificate_chain(buf, ec);
-    ...
-    mSslContext.use_private_key(buf, boost::asio::ssl::context::pem, ec);
-    ...
-  }
-  ...
-}
-```
-
-```cpp
-static std::string ensureCertificate()
-{
-  ...
-  fs::path certFile = certPath / "server.pem";
-  ...
-  std::string sslPemFile(certFile);
-  return ensuressl::ensureOpensslKeyPresentAndValid(sslPemFile);
-}
-```
-
-- bmcweb 在伺服器啟動時透過 `loadCertificate()` 載入一次憑證 context
-- `getSslServerContext()` 會準備並驗證 `/etc/ssl/certs/https/server.pem` — 注意這是單一合併的 PEM 檔，同時包含憑證與金鑰，正是 [§10](#cn-10) 提到的格式之一
-- PEM 資料透過 `use_certificate_chain` 與 `use_private_key(..., pem)` 載入 — 這就是命令列的 `openssl x509`／`openssl pkey` 檢視方式，對應到 C++/OpenSSL API 上的版本
-
-```text
-Server::run()
-   |
-loadCertificate()
-   |
-getSslServerContext()
-   |
-read / verify PEM (server.pem)
-   |
-use_certificate_chain + use_private_key
-   |
-accept socket
-   |
-async_detect_ssl(...)
-   |
-   +-- isTls = false -> HttpType::HTTP  -> doReadHeaders()
-   |
-   +-- isTls = true  -> HttpType::HTTPS -> async_handshake(server)
-                                      |
-                                      +-- fail -> close/return
-                                      |
-                                      +-- ok   -> afterSslHandshake()
-                                                  -> ALPN / HTTP parser
-```
-
-### B. ALPN：選定 HTTP/2
-
-原始碼：`src/ssl_key_handler.cpp`
-
-```cpp
-static int alpnSelectProtoCallback(
-  SSL* /*unused*/, const unsigned char** out, unsigned char* outlen,
-  const unsigned char* in, unsigned int inlen, void* /*unused*/)
-{
-  int rv = nghttp2_select_alpn(out, outlen, in, inlen);
-  if (rv == -1)
-  {
-    return SSL_TLSEXT_ERR_NOACK;
-  }
-  if (rv == 1)
-  {
-    BMCWEB_LOG_DEBUG("Selected HTTP2");
-  }
-  return SSL_TLSEXT_ERR_OK;
-}
-```
-
-這是 [§7](#cn-7) 提到的 ALPN 協商在伺服器端的實作 — 如果 client 有提供 `h2`，nghttp2 就會選它。
-
-### C. 握手之後：若 ALPN 選中就導向 HTTP/2
-
-原始碼：`http/http_connection.hpp`
-
-```cpp
-if constexpr (BMCWEB_HTTP2)
-{
-  const unsigned char* alpn = nullptr;
-  unsigned int alpnlen = 0;
-  SSL_get0_alpn_selected(adaptor.native_handle(), &alpn, &alpnlen);
-  if (alpn != nullptr)
-  {
-    std::string_view selectedProtocol(
-      std::bit_cast<const char*>(alpn), alpnlen);
-    BMCWEB_LOG_DEBUG("ALPN selected protocol \"{}\" len: {}",
-             selectedProtocol, alpnlen);
-    if (selectedProtocol == "h2")
+    if (res.result() == boost::beast::http::status::switching_protocols)
     {
-      upgradeToHttp2();
-      return;
+        upgradeToHttp2();  // h2c 升級：-> 旁支：HTTP/2
+        return;
     }
-  }
-}
 
-doReadHeaders();
-```
+    if (!keepAlive)
+    {
+        gracefulClose();  // 非 Keep-Alive：關閉連線
+        return;
+    }
 
-這就是實際的分流點：`h2` 會導向 `HTTP2Connection`；其他情況（`http/1.1`，或根本沒有 ALPN）則會繼續走 HTTP/1.x 的 header parser。
-
-### D. HTTP/1.x 處理：版本檢查與 Keep-Alive
-
-原始碼：`http/http_connection.hpp`
-
-```cpp
-// Check for HTTP version 1.1.
-if (req->version() == 11)
-{
-  if (req->getHeaderValue(field::host).empty())
-  {
-    ...
-  }
-}
-
-...
-keepAlive = req->keepAlive();
-```
-
-bmcweb 並沒有把 HTTP/1.0 與 HTTP/1.1 拆成兩套獨立的 handler — 它讀取 `req->version()` 與 `req->keepAlive()`，並依賴 Boost.Beast 本身的語意處理，因此 [§12](#cn-12) 提到的這兩個版本都是走同一套程式碼路徑；連線是否維持則完全依請求本身傳達的語意而定。
-
-### E. h2c 支援：把明文 HTTP/1.1 升級成 HTTP/2
-
-原始碼：`http/http_connection.hpp`
-
-```cpp
-if (BMCWEB_HTTP2 && isH2c)
-{
-  std::string_view base64settings = req->req["HTTP2-Settings"];
-  if (utility::base64Decode<true>(base64settings, http2settings))
-  {
-    res.result(boost::beast::http::status::switching_protocols);
-    res.addHeader(boost::beast::http::field::connection, "Upgrade");
-    res.addHeader(boost::beast::http::field::upgrade, "h2c");
-  }
+    // Keep-Alive：清空 Response/重置 Parser，回到階段 3 繼續讀下一筆 Request
+    res.clear();
+    initParser();
+    doReadHeaders();
 }
 ```
 
-```cpp
-if (res.result() == boost::beast::http::status::switching_protocols)
-{
-  upgradeToHttp2();
-  return;
-}
-```
+---
 
-明文 HTTP 也能透過 `Upgrade` header 機制切換到 `h2c` — 伺服器回覆 `101 Switching Protocols`，接著切換進入 `HTTP2Connection`。（如同 [§12](#cn-12) 提到的，沒有任何主流瀏覽器真的會在明文連線上這麼做，但這條程式碼路徑是為非瀏覽器 client 準備的。）
+#### 旁支：如果連線走 HTTP/2
 
-### F. HTTP/2 內部運作：從 Frame Callback 到回應
-
-原始碼：`http/http2_connection.hpp`
+不管是階段 2 的 ALPN 選中 `h2`，還是階段 4/8 的明文 h2c 升級，一旦 `upgradeToHttp2()` 被呼叫，這條連線後續就交給 `http/http2_connection.hpp` 的 `HTTP2Connection` 接手 —— 它不再用 Boost.Beast 的 header/body parser，而是用 **nghttp2** 直接處理二進位 frame（[§12](#cn-12) 提到的 Binary framing／多工，在這裡是實際程式碼）：
 
 ```cpp
+// http/http2_connection.hpp
 int onFrameRecvCallback(const nghttp2_frame& frame)
 {
-  BMCWEB_LOG_DEBUG("frame type {}", static_cast<int>(frame.hd.type));
-  switch (frame.hd.type)
-  {
-    case NGHTTP2_DATA:
-    case NGHTTP2_HEADERS:
-      if ((frame.hd.flags & NGHTTP2_FLAG_END_STREAM) != 0)
-      {
-        return onRequestRecv(frame.hd.stream_id);
-      }
-      break;
-    default:
-      break;
-  }
-  return 0;
+    switch (frame.hd.type)
+    {
+        case NGHTTP2_DATA:
+        case NGHTTP2_HEADERS:
+            if ((frame.hd.flags & NGHTTP2_FLAG_END_STREAM) != 0)
+            {
+                return onRequestRecv(frame.hd.stream_id);  // 收完一個 stream 的請求
+            }
+            break;
+        default:
+            break;
+    }
+    return 0;
 }
 ```
+
+`onRequestRecv()` 內部一樣會建立 `Request`／`AsyncResp`，交給同一個 Router（等同階段 5–6 的邏輯），只是最後不是呼叫 `doWrite()`，而是把回應轉成 HTTP/2 frame 送出：
 
 ```cpp
 int rv = ngSession.submitResponse(streamId, hdr, &dataPrd);
 if (rv != 0)
 {
-  BMCWEB_LOG_ERROR("Fatal error: {}", nghttp2_strerror(rv));
-  close();
-  return -1;
+    BMCWEB_LOG_ERROR("Fatal error: {}", nghttp2_strerror(rv));
+    close();
+    return -1;
 }
 ```
 
-nghttp2 接收 `HEADERS`／`DATA` frame，並在遇到 `END_STREAM` 時視為請求已接收完成；既有的應用層 handler 會產生回應，再由 nghttp2 重新編碼回 HTTP/2 frame — 這就是 [§12](#cn-12) 所描述的二進位分幀／多工，在實際程式碼中的具體版本。
-
-### G. 流程圖
+### 流程圖速覽
 
 **HTTPS + ALPN 路由：**
 
@@ -1857,7 +2004,7 @@ TCP accept
    |
 detect SSL?
    |
-   +-- no  -> HTTP (plaintext) path
+   +-- no  -> HTTP (plaintext) path -> doReadHeaders()
    |
    +-- yes -> TLS handshake
          |
@@ -1875,13 +2022,16 @@ HTTP/1.1 request
    |
 check Connection: Upgrade + Upgrade: h2c
    |
-decode HTTP2-Settings
+decode HTTP2-Settings, 標記 res = 101 Switching Protocols
    |
-set status 101 Switching Protocols
+(仍會先跑一次正常路由 -> completeRequest 把 res 換成路由結果)
    |
-after write response
+doWrite() 把最終的 res 寫回 client
    |
-upgradeToHttp2() -> startFromSettings(...) -> HTTP2Connection
+afterDoWrite() 檢查 res.result() == switching_protocols?
+   |
+   +-- 是 -> upgradeToHttp2() -> HTTP2Connection
+   +-- 否 -> 這個連線就不會切到 HTTP/2
 ```
 
 **HTTP/2 請求生命週期：**
@@ -1902,7 +2052,7 @@ END_STREAM?
          +-- submitResponse(streamId, ...)
 ```
 
-### H. 快速測試指令
+### 快速測試指令
 
 ```bash
 # Test HTTP/1.0
@@ -2004,4 +2154,4 @@ curl -v --http2 https://host/
 - 一張憑證的可信度取決於它背後的信任鏈 —— 自簽憑證用在封閉系統沒問題，但不適合任何公開場合（[§8](#cn-8)）
 - OpenSSL 的命令列工具只用一小組好記的指令，就涵蓋了產生、檢視、轉換與線上測試（[§11](#cn-11)、[附錄 B](#cn-b)）
 - HTTP/2 與 HTTP/3 主要解決的是 HTTP/1.x 遺留下來的連線／併發瓶頸，而不是安全性問題 —— 但 HTTP/3 把 TLS 1.3 直接內建進了它的傳輸層握手中（[§12](#cn-12)、[§14](#cn-14)、[§15](#cn-15)）
-- 一個後端是否「支援」以上這一切，取決於應用程式伺服器、TLS 函式庫，以及前方任何反向代理三者共同配合的結果 —— [§19](#cn-19)–[§20](#cn-20) 完整示範了一個真實實作（bmcweb）如何從頭到尾把這些串接起來
+- 一個後端是否「支援」以上這一切，取決於應用程式伺服器、TLS 函式庫，以及前方任何反向代理三者共同配合的結果 —— [§20](#cn-20)–[§21](#cn-21) 完整示範了一個真實實作（bmcweb）如何從頭到尾把這些串接起來
