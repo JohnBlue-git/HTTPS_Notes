@@ -435,7 +435,7 @@ Client                                                                Server
   │  [Both sides independently derive the same symmetric key]                       │
   │  Client: Compute(Client ECDHE PrivKey + Server ECDHE PubKey + Randoms)          │
   │                                                                                 │
-  │  【 Session Key / AES Key 】 <─────── identical on both sides ────────          │
+  │  【 Session Key / AES Key 】 <─────── identical on both sides ────────           │
   │                                                                                 │
   │  Server: Compute(Server ECDHE PrivKey + Client ECDHE PubKey + Randoms)          │
   │                                                                                 │
@@ -446,7 +446,7 @@ Client                                                                Server
 
   Client                                                                         Server
     │                                                                               │
-    │ === 9. HTTP / HTTPS data transfer (encrypted with the 【Session Key】) ===    │
+    │ === 9. HTTP / HTTPS data transfer (encrypted with the 【Session Key】) ===      │
     │                                                                               │
 ```
 
@@ -568,7 +568,7 @@ Client                                                                Server
   │  [Both sides independently derive the same symmetric key]                       │
   │  Client: Compute(Client ECDHE PrivKey + Server ECDHE PubKey + Randoms)          │
   │                                                                                 │
-  │  【 Session Key / AES Key 】 <─────── identical on both sides ────────          │
+  │  【 Session Key / AES Key 】 <─────── identical on both sides ────────           │
   │                                                                                 │
   │  Server: Compute(Server ECDHE PrivKey + Client ECDHE PubKey + Randoms)          │
   │                                                                                 │
@@ -579,7 +579,7 @@ Client                                                                Server
 
   Client                                                                         Server
     │                                                                               │
-    │ === 9. HTTP / HTTPS data transfer (encrypted with the 【Session Key】) ===    │
+    │ === 9. HTTP / HTTPS data transfer (encrypted with the 【Session Key】) ===      │
     │                                                                               │
 ```
 
