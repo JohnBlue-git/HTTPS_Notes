@@ -32,10 +32,9 @@
 **Part 4 — HTTP 協定版本**
 - [12) HTTP/1.0 vs HTTP/1.1 vs HTTP/2 vs HTTP/3](#cn-12)
 
-**Part 5 — 握手文字圖示**
+**Part 5 — 握手與傳輸層演進圖示**
 - [13) TCP 與 TLS 1.2 握手](#cn-13)
-- [14) TLS 1.3 握手與 0-RTT](#cn-14)
-- [15) 基於 QUIC 的 HTTP/3](#cn-15)
+- [14) TLS 1.3 與 QUIC / HTTP/3 握手與演進](#cn-14)
 
 **Part 6 — 安全性強化**
 - [16) 歷史攻擊與現代預設值存在的原因](#cn-16)
@@ -46,6 +45,7 @@
 **Part 7 — 應用案例：OpenBMC bmcweb**
 - [20) 透過 Redfish 管理 PEM 憑證](#cn-20)
 - [21) bmcweb 原始碼走讀](#cn-21)
+- [22) 案例研究：Session ID / Session Ticket 與各種應用層 Token 的差異](#cn-22)
 
 **附錄**
 - [A) 詞彙表](#cn-a)
@@ -477,9 +477,40 @@ Verify: 計算 Cert 雜湊 Hash( CertInfo || Server Public Key ) == 解密 CA �
 
 ### 簡化握手（Session Resumption）
 
+這裡要先分清楚兩個不同層次的「重用」：
+
+- **HTTP keep-alive / persistent connection**：是同一條 TCP 連線可以用來傳多個 HTTP 請求／回應。它是 HTTP 層的連線重用，不屬於 TLS 握手的 RTT 成本。
+- **TLS Session Resumption**：是同一個 client 與 server 之間，重用先前完成的 TLS session 狀態，以縮短下一次握手的往返時間。它發生在 TLS 層，屬於握手優化，不是 HTTP 的 Header / Cookie 機制。
+
+這兩者最重要的區別是：
+
+- **Keep-Alive 不屬於 RTT**：它不是「省掉幾輪握手」；而是「省掉重建 TCP 連線與反覆建立新請求路徑」的成本。換句話說，長連線是讓一條路徑反覆載入多個請求，而不是改變 TLS 握手的延遲。
+- **Session Resumption 會影響 RTT**：它直接減少 TLS 重新建立「憑證驗證 + 金鑰交換」所需的往返，通常能把完整握手從 2 RTT 降成 1 RTT，甚至 TLS 1.3 的 0-RTT。
+
 每次連到剛造訪過的網站都重新走一次完整握手很浪費。TLS 會快取足夠的狀態，藉此跳過大部分流程：
 - **Session ID** — server 保留 session 狀態，client 只需提醒它那個 ID
 - **Session Tickets**（RFC 5077） — server 把自己的 session 狀態加密成一張 ticket 交給 client；伺服器端不需要儲存任何東西，因此擴充性更好
+
+通常這個 session 狀態儲存在：
+
+- **Client 端**：TLS library 的 session cache（例如 OpenSSL/Browser/HTTP client 內部記憶體，或長期 cache 檔案／記憶體中）
+- **Server 端**：記憶體中的 session cache，或是 session ticket 讓 server 不必存太多狀態
+- **HTTP Cookie**：不是 TLS session resumption 的儲存位置；Cookie 是應用層資料，屬於 HTTP，不能直接取代 TLS session 機制
+- **HTTP Header**：`ClientHello` 的 TLS 擴充欄位（例如 `session_id`、`session_ticket`）會在 TLS layer 中傳送，不是普通 HTTP request header
+
+實務上，client / server 程式碼可能像這樣呈現：
+
+```c
+// 範例：OpenSSL / library 端的 TLS session cache
+SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_CLIENT | SSL_SESS_CACHE_SERVER);
+SSL_CTX_set_tlsext_ticket_keys(ctx, key, sizeof(key));
+
+// 之後重新連線時，client 會在 ClientHello 中帶回舊 session
+// server 會判斷是否能 Resume
+if (SSL_session_reused(ssl) != 0) {
+    printf("TLS session resumed\n");
+}
+```
 
 ```text
 Client                                Server
@@ -491,6 +522,8 @@ Client                                Server
 ```
 
 這能把握手縮短成 **1 RTT 往返**，並完全跳過憑證驗證與非對稱式金鑰交換（重複使用原始 session 衍生出的密鑰來產生新的金鑰）。
+
+注意：這與 HTTP keep-alive 是不同層級的優化；一個連線即使用 keep-alive，下一次重新建立新 TLS session 仍可能需要重新做握手；反過來，TLS session resumption 也不代表 HTTP 請求會自動共用同一個 TCP 連線。真正的「長連線」與「重用握手」是兩回事。
 
 TLS 1.3 的握手與 0-RTT 恢復機制差異夠大，值得另外畫一張圖 — 見 [§14](#cn-14)。
 
@@ -789,10 +822,43 @@ openssl speed aes-128-gcm          # benchmark a cipher on this machine
 
 現今大部分網路流量骨子裡其實還是跑在這個版本上，只是被 HTTP/2 的光環蓋過去了。
 
-- **預設使用持久連線（Persistent connections）** — 一個 TCP 連線可以承載許多個請求
+- **預設使用持久連線（Persistent connections）** — 這就是 HTTP/1.1 裡的 **keep-alive 機制**：一個 TCP 連線可以承載許多個請求，不必每個請求都重新建立一個新連線
 - **強制要求 `Host` header** — 讓「以名稱為基礎的虛擬主機（name-based virtual hosting）」成為可能（一個 IP 服務多個網域）
 - **Chunked transfer encoding** — 回應本文可以在不預先知道總長度的情況下邊產生邊串流傳送
 - **Pipelining** — 技術上允許不等前一個回應就送出下一個請求，但會遭受 head-of-line blocking 問題（一個慢回應會擋住排在它後面的所有請求），實務上瀏覽器幾乎都不使用它
+
+這裡的「持久連線」與「keep-alive」其實是同一回事：它追求的是「用同一條連線來重複處理多個請求／回應」，而不是每次都重新打開 TCP/TLS 連線。這個優化是 HTTP 層的連線重用，和 TLS 的 session resumption 是不同概念；前者不是 RTT，後者才是 TLS 握手的 RTT 優化。
+
+**不是每個網路伺服器（Server）都能完美支援所有優化功能，這完全取決於伺服器軟體的實作、版本以及後端的設定。**
+
+HTTP 協議本身是一套「規範（Specification）」，就像一份法律文件。它定義了某些 Header、語意與行為，但它不等於「所有伺服器都會照著它完全實作」。各家廠商（如 Nginx、Apache、Node.js、或是您自己用 C++ 寫的輕量 Server）在寫程式碼時，可以選擇**完整實作**、**部分實作**，甚至**完全忽略**某些 Header。
+
+這也代表：
+
+- `Connection: keep-alive` 可能在某些伺服器的實作中完全正確運作
+- 某些伺服器可能只支援 `gzip`，而不支援 `br`
+- 某些 HTTP 伺服器可能接受 `ETag`、`If-None-Match`，但另一些只做最基本的處理
+- 某些 server 可能實作了 `Accept-Encoding`，但並沒有把壓縮、快取、條件式請求全都做完整
+
+所以當我們在學習 Header 時，不要把「規範允許」誤當成「所有部署都一定支援」。真正能決定行為的是：**實作、版本、編譯選項、反向代理、上游服務**，以及**你所用的程式庫和 runtime**。
+
+HTTP/1.1 常見的個別優化與相關 Header（示意，不是全部都需要同時開啟）：
+
+- **保持連線活著 / 連線重用**：
+  - `Connection: keep-alive`
+  - `Keep-Alive: timeout=30, max=100`
+- **內容壓縮**：
+  - `Accept-Encoding: gzip, br, deflate`
+- **快取控制**：
+  - `Cache-Control: public, max-age=300`
+  - `ETag: "abc123"`
+  - `If-None-Match: "abc123"`
+- **條件式請求**：
+  - `If-Modified-Since: Tue, 19 Sep 2026 00:00:00 GMT`
+- **壓縮／資料格式協商**：
+  - `Accept: application/json, text/html`
+
+這些 header 不是「把 TLS 握手變快」；而是讓 HTTP 在現有連線上更加有效率：減少重複連線、減少傳輸冗餘、讓快取與壓縮更有效。
 
 概念圖：Persistent connections
 ```text
@@ -873,7 +939,7 @@ HTTP/2 / HPACK：先建立動態字典（Dynamic Table），後續只傳「差�
 
 Dynamic Table（伺服器 / client 共用）
 ------------------------------------------------
-| 索引 | 欄位名稱         | 欄位值               |
+| 索引 | 欄位名稱         | 欄位值                |
 | 1    | :method          | GET                |
 | 2    | :scheme          | https              |
 | 3    | :authority       | example.com        |
@@ -964,11 +1030,11 @@ Req H ──┘
 HTTP/2：同一條 TCP 連線上有多個獨立 stream
 
 TCP Connection
--------------------------------------------------
-| Stream 1 | Stream 2 | Stream 3 | Stream 4 | 
-| HTML     | CSS      | JS       | IMG      | 
-|  Req     |  Req     |  Req     |  Req     | 
--------------------------------------------------
+----------------------------------------------
+| Stream 1 | Stream 2 | Stream 3 | Stream 4  | 
+| HTML     | CSS      | JS       | IMG       | 
+|  Req     |  Req     |  Req     |  Req      | 
+----------------------------------------------
 
 「多工」的意思是：
 - 多個 stream 並行存在於同一個連線內
@@ -995,13 +1061,15 @@ TCP Connection
 - **連線遷移（Connection migration）** — 連線能撐過網路環境的變化（例如從 Wi-Fi 切到行動網路），因為連線是以 Connection ID 識別，而不是 IP/port 組合
 - 可以對曾經造訪過的伺服器提供 **0-RTT** 重新連線（與 TLS 1.3 0-RTT 有相同的重送風險考量 — 見 [§14](#cn-14)）
 
+> 這裡的「演進」要從 1.0 → 1.1 → 2 → 3 做整體觀察：12) 是比較 HTTP 版本與其傳輸/連線模型的總覽；14) 與 15) 則是進一步補上 TLS 1.3 以及 QUIC/HTTP/3 的傳輸層變化。若把 14/15 完全拆進 12) 會讓「HTTP 協定版本比較」與「TLS/QUIC 傳輸層改進」混在一起，因此最自然的寫法是：12) 定義主軸，14/15 是該主軸下的傳輸層細節延伸。實務上它們是連動的演進，而不是完全獨立的數個草木。
+
 概念圖：stream independency
 ```text
 QUIC Connection (Connection ID)
 -------------------------------------------------
-| Stream 1 | Stream 2 | Stream 3 | Stream 4 | 
-| HTML     | CSS      | JS       | IMG      | 
-| 可靠傳輸 | 可靠傳輸  | 可靠傳輸  | 可靠傳輸  | 
+| Stream 1 | Stream 2 | Stream 3 | Stream 4     | 
+| HTML     | CSS      | JS       | IMG          | 
+| 可靠傳輸  | 可靠傳輸   | 可靠傳輸  | 可靠傳輸      | 
 -------------------------------------------------
 
 一個封包遺失時，只有它所屬的 stream 受影響
@@ -1082,11 +1150,18 @@ Client                                Server
 ---
 
 <a id="cn-14"></a>
-## 14) TLS 1.3 握手與 0-RTT
+## 14) TLS 1.3 與 QUIC / HTTP/3 握手與演進
+
+這一節把 TLS 1.3 的握手優化與 QUIC / HTTP/3 的傳輸層重構放在同一條演進軸上來看。從觀念上說：
+
+- **TLS 1.3** 是「安全握手」的改進：更短、更簡潔、更強的保護
+- **QUIC / HTTP/3** 是「連線模型」的改進：不再依賴傳統 TCP，而是把連線與 TLS 一起重新設計
+
+它們不是互相排斥的概念，而是同一波網路協定演進的不同層面：TLS 1.3 負責「如何安全地建立加密連線」，QUIC 負責「如何在傳輸層上更可靠、更快地承載多個 HTTP stream」。
+
+### TLS 1.3：完整的 1-RTT 握手
 
 TLS 1.3 讓 client 在第一則訊息裡就直接「猜」一個金鑰交換群組並送出自己的金鑰分享值，而不是等 server 告知想用哪個群組，藉此把握手從 2 個往返縮短為 1 個。
-
-### 完整的 1-RTT 握手
 
 ```text
 Client                                              Server
@@ -1107,7 +1182,7 @@ Client                                              Server
 - client 送出自己的 `Finished` 之後可以立即送出應用層資料 — 加密後的應用層資料會跟握手最後一則訊息**在同一波（flight）**一起送出
 - TLS 1.3 已經不存在靜態 RSA 金鑰交換 — 每次握手都使用 (EC)DHE，所以每個 session 預設都具備完全前向保密（見 [§6](#cn-6)）
 
-### 0-RTT 恢復（及其取捨）
+### TLS 1.3：0-RTT 恢復（及其取捨）
 
 如果 client 手上有先前連到同一台伺服器所拿到的 session ticket（PSK），它可以在第一波訊息中就直接送出加密的應用層資料：
 
@@ -1122,10 +1197,9 @@ Client                                 Server
 - client 的第一個請求*送出*之前，往返次數是零 — 對回訪用戶來說是實實在在的延遲優勢
 - **要注意：0-RTT 資料不具前向保密性，而且可被重送（replayable）。** 這些資料裡沒有任何內容跟 server 產生的、無法預測的新鮮值綁在一起，所以攔截到 0-RTT 請求的網路攻擊者可以直接重送它，而 server 沒有內建方法能分辨這與原始請求的差異。這正是為什麼 0-RTT 只建議用在冪等（idempotent）操作（安全的 `GET` 請求）上，絕不能用在任何有副作用的操作（付款、表單送出）。
 
----
+### QUIC / HTTP/3：把握手與傳輸重做成一張圖
 
-<a id="cn-15"></a>
-## 15) 基於 QUIC 的 HTTP/3
+當我們從 TLS 1.3 的「更快握手」再往前走一層，來看 HTTP/3 的 QUIC：
 
 ```text
 Client                                Server
@@ -1141,6 +1215,9 @@ Client                                Server
 - QUIC 把傳輸層握手與 TLS 1.3 握手合併成單一次交換 — 不再有獨立的「先 TCP 連線、再走 TLS 握手」這兩個階段
 - 每個 HTTP/3 請求／回應都跑在自己獨立可靠的 QUIC stream 上，所以一個封包遺失只會卡住它所屬的那個 stream
 - QUIC 連線是以 Connection ID 識別，而不是傳統的（來源 IP、來源埠、目的 IP、目的埠）四元組，這正是連線遷移之所以可行的原因
+- 這也是為什麼 HTTP/3 的設計看起來像「把 TCP + TLS 上層重做」，因為它不只是改變 HTTP；它同時重寫了「連線如何建立、如何可靠傳輸、如何多工、如何在網路切換時維持會話」。
+
+這一段最重要的觀念是：**TLS 1.3 是握手速度的進化，QUIC / HTTP/3 是整體連線模型的重構**。兩者相輔相成，但它們並不是同一個層級的交換。
 
 ---
 
@@ -1748,6 +1825,29 @@ void afterReadHeaders(const std::shared_ptr<self_type>& /*self*/,
 * **檔案位置：** `http/http_connection.hpp`
 * **說明：** `handle()` 先做 HTTP/1.1 的 `Host` header 檢查，並讀出 `keepAlive`（[§12](#cn-12) 提到的 HTTP/1.0 vs 1.1 差異，就是靠這裡的 `req->version()`／`req->keepAlive()`，而不是兩套獨立程式碼路徑）；接著做認證檢查，建立 `AsyncResp` 並註冊 `completeRequest` 為完成回呼；`doUpgrade()` 檢查這個請求是不是要切到 WebSocket / SSE，是的話直接交給 `handler->handleUpgrade()` 並回傳 `true`（`handle()` 就此 return）；都不是的話才把請求交給 Router（階段 5）。
 
+這裡的 `keepAlive` 是 **HTTP 層**的長連線管理，不是 TLS session resumption。實際程式碼會寫：
+
+```cpp
+keepAlive = req->keepAlive();
+...
+res.keepAlive(keepAlive);
+```
+
+也就是說："這次請求是否能繼續共用 socket"，是由 HTTP request/response 自己決定，而不是由 TLS 的 `session_id` / `session_ticket` 控制。`session_id`/`session_ticket` 是被 OpenSSL 在 TLS 握手層處理，這點在 bmcweb 的程式碼中也可以觀察到：它沒有手動實作一個自訂的 `SessionTicket` 結構；它只在 mTLS 情境下呼叫 `SSL_set_session_id_context(...)`，為當前連線（OpenSSL SSL 物件）設置 session ID context，以區分不同用途的 TLS context；真正的 session cache 與 ticket 恢復則由 OpenSSL / Boost.Asio 預設機制處理。
+
+bmcweb 目前的實際設計，重點是：
+
+- **HTTP keep-alive**：明確在 `handle()` / `completeRequest()` 之間處理，使用 `req->keepAlive()`、`res.keepAlive(keepAlive)`
+- **TLS session resumption**：沒有在 bmcweb 應用層新增自定義 `session_id` / `session_ticket` 物件；它依賴底層 OpenSSL 的 TLS session cache 與 `SSL_CTX` 預設設定
+- **mTLS session ID context**：僅在 `prepareMutualTls()` 中用 `SSL_set_session_id_context(...)` 設定一段固定標記字串 `"bmcweb"`，用來幫 SSL session 區分上下文；這不是 HTTP Cookie，也不是 HTTP header，屬於 TLS 內部的識別資訊
+
+```cpp
+constexpr std::string_view id = "bmcweb";
+SSL_set_session_id_context(adaptor.native_handle(), idCPtr, idLen);
+```
+
+因此 bmcweb 的實際狀態是：**它有“長連線 keep-alive”與“mTLS session context”這兩種狀態管理，但沒有一段明確的應用程式層 session ticket 實作**；如果要追根究底，還是要回到 OpenSSL 及其 SSL_CTX / TLS session cache 的實作。
+
 ```cpp
 // http/http_connection.hpp
 void handle()
@@ -2072,6 +2172,324 @@ curl -v --http2 https://<bmc-host>/redfish/v1
 
 ---
 
+<a id="cn-22"></a>
+## 22) 案例研究：Session ID / Session Ticket 與各種應用層 Token 的差異
+
+這裡最容易搞混的地方，是把「TLS 的 session」和「Web 應用的 token」混為一談。它們雖然都叫做「session」或「token」，但它們的**層級、目的、儲存位置、生命週期**完全不同。
+
+先說結論：
+
+- **TLS Session ID / Session Ticket**：屬於 **TLS / 傳輸層安全**，用來重用握手狀態，減少 RTT。
+- **Session Token / Session ID**：屬於 **Web 應用層**，用來辨識一個登入使用者的會話。
+- **JWT / Access Token / ID Token**：屬於 **身份驗證與授權**，用來表達「誰」與「能做什麼」。
+- **CSRF Token**：屬於 **防禦攻擊**，防止瀏覽器發起跨站偽造請求，不是用來認證使用者身份。
+- **OTT / One-Time Token**：屬於 **一次性驗證**，常用於重設密碼、驗證信箱、雙因子驗證。
+- **API Key / Bearer Token**：屬於 **機器對機器或 API 授權**。
+- **Hardware Token / Security Token**：屬於 **實體裝置或硬體 MFA**。
+
+#### 先做一個總覽表：哪些東西是同一層的？
+
+| 名稱 | 層級 | 主要用途 | 常見儲存位置 | 典型生命週期 | 是否會影響 TLS 握手 RTT |
+|---|---|---|---|---|---|
+| **TLS Session ID** | TLS / Transport Security | 重用先前握手狀態 | server memory / TLS library cache | 短期（cache） | **是** |
+| **TLS Session Ticket** | TLS / Transport Security | 把握手狀態交給 client；server 不需持有全部狀態 | client side ticket + server key | 短到中期 | **是** |
+| **Session Token / Session ID** | HTTP Application Layer | 辨識使用者登入 session | Cookie / server-side session store | 一般為瀏覽器 session | **否** |
+| **JWT (Access Token / ID Token)** | OAuth / Identity | bearer / identity / authorization assertions | client local storage / memory / HTTP Authorization header | 可短期或長期，依配置 | **否** |
+| **CSRF Token** | Web App Security | 防止跨站偽造請求 | hidden form field / cookie + header | 一個 session 期間 | **否** |
+| **OTT / One-Time Token** | Auth / Verification | 驗證一次性操作 | URL、email、SMS、OTP 內 | 很短（秒 / 分鐘） | **否** |
+| **API Key / Bearer Token** | API Auth | Machine-to-machine / API 授權 | header / config / secret store | 可長期 | **否** |
+| **Hardware Token / Security Token** | MFA / PKI | 提供實體/硬體身份驗證 | YubiKey / smart card / TPM / HSM | 長期但可撤銷 | **否** |
+| **OAuth 2.0 / OIDC** | Authorization Framework | 請求授權、取得 token | client / browser / auth server | token 依策略 | **否** |
+
+> 先建立這個心智模型：**TLS Session ID / Ticket 是「讓握手更快」的機制；Session Token / JWT / CSRF Token 是「讓應用層知道誰在做什麼」的機制。**它們是不同層，不能直接互相代換。
+
+#### 1) TLS Session ID / Session Ticket：重用握手，不是使用者登入身份
+
+這是 TLS 在做的事，跟登入、JWT、Cookie 完全不是同一個問題。
+
+```text
+Client                                Server
+  | -- ClientHello + old session id --> |
+  |                                     |
+  | <----- ServerHello (resumed) ------ |
+  | <----- Finished ------------------  |
+  | ----- Finished -------------------> |
+  | ===== Application Data ===========  |
+```
+
+- **Session ID**：server 保留 session 狀態（通常存在記憶體快取或 TLS cache）；client 只提供 ID
+- **Session Ticket**：server 把狀態加密成 ticket 交給 client；server 無需保留所有資料，擴充性較好
+- 這個資料是給 **TLS library** 使用，目的是讓雙方不用重新做完整的證書驗證與金鑰交換
+
+它並不代表：
+
+- 使用者已登入
+- 使用者有哪個角色
+- 這個連線一定是某個帳號
+
+它只是說：
+
+- 「我曾經跟這台 server 握過手」
+- 「可以重用之前的 TLS 狀態，減少 RTT」
+
+#### 2) Session Token (Session ID)：應用層的「登入會話識別碼」
+
+這裡才是 Web app 常見的登入 session。典型用法：
+
+```text
+Browser                                  Server
+  | -- POST /login (username, pwd) -->     |
+  |                                        |
+  | <----- 200 OK + Set-Cookie: SID=abc123 |
+  |                                        |
+  | -- GET /profile Cookie: SID=abc123 --> |
+  |                                        |
+  | <----- 200 OK with user profile        | 
+```
+
+- server 建立一個 session record：`SID -> user_id, role, expiry, ...`
+- server 請 browser 保存這個 `SID`，通常放在 Cookie
+- 之後每個請求都帶上這個 Cookie，server 就知道：這個請求來自哪個使用者
+- **這個 `SID` 不是 TLS session ID**，也不是 JWT；它是 **應用層 session identity**
+
+常見儲存位置：
+
+- Cookie（最常見）
+- server-side session store（Redis、Memcached、DB、in-memory）
+- 可能用 `HttpOnly`, `Secure`, `SameSite` 來限制
+
+#### 3) Access Token / ID Token：JWT 通常是其中一種表達方式
+
+這些 token 是身份與授權的載體，通常不是用來「保持 TCP/TLS 連線」的，而是用來「描述使用者跟授權」。
+
+```text
+Client                                 Auth Server                              API Server
+  | -- 轉址到登入 /oauth/authorize ---->    |                                      |
+  |                                       | -- 驗證登入與同意 -->                   |
+  | <--- 302 redirect with code --------- |                                      |
+  | -- POST /token code=... ------------> |                                      |
+  |                                       | -- issue access_token + id_token --> |
+  | <---- access_token, id_token -------  |                                      |
+  | -- GET /api/data Authorization: Bearer <access_token> -------------------->  |
+  |                                                                              | -- verify JWT signature -->
+  |                                                                              | -- check scopes/claims -->
+  | <----------------------- 200 OK with data ---------------------------------- |
+```
+
+##### JWT（JSON Web Token）
+
+JWT 本身並不是「一種協定」，而是一種常見的 **Token 格式**。它通常長這樣：
+
+```text
+eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+JWT 由三段組成：
+
+- `Header`：演算法類型（HS256 / RS256）
+- `Payload`：claims，例如 `sub`, `aud`, `exp`, `scope`, `iss`
+- `Signature`：用 server 私鑰簽章，讓 client 無法偽造
+
+常見用途：
+
+- **Access Token**：給 API server，用來確認使用者是否有權限訪問某資源
+- **ID Token**：給 client / 前端，用來表達「這個使用者是誰」
+
+**重點：**
+
+- JWT 不是 TLS Session Ticket
+- JWT 也不是 Session ID
+- JWT 跟 Cookie 也不是同一層
+- 它通常是「身分與授權的宣告」，而不是「保持會話的識別碼」
+
+##### CSRF Token
+
+CSRF Token 的目的不是登入認證，而是「防止跨站偽造請求（Cross-Site Request Forgery）」。
+
+重點在這裡：**瀏覽器會自動帶上 Cookie，但惡意站點的 JavaScript 不能讀到你網站的 Cookie**。這正是 CSRF Token 能工作的原因。
+
+```text
+假設你已經登入網站 A，並且網站 A 讓你在 Cookie 裡存了：
+  csrftoken=abc5566
+
+Bad Site (惡意網站)
+  | -- 觸發 form / img / fetch 到 A --> |
+  |                                       |
+  |                                       | -- Browser 自動把 A 的 Cookie 一起帶上
+  |                                       |    例如：Cookie: csrftoken=abc5566
+  |                                       | -- 但惡意站點的 JS 無法讀到這個 Cookie
+  |                                       |    因為同源政策阻止它存取 A 的資料
+  |                                       |
+  |                                       | -- 伺服器再檢查：
+  |                                       |    Cookie = abc5566
+  |                                       |    Header = 空 / 錯 / 不一致
+  |                                       |    => 判定為 CSRF，拒絕請求
+```
+
+這樣的流程就是 CSRF 的核心：
+
+- **Cookie 會被自動帶走**：因為瀏覽器說「這個請求是往 A 的網站發的，我就把 A 的 Cookie 附上」
+- **Header 不會被惡意網站直接讀到**：因為同源政策（Same-Origin Policy）限制了 JavaScript 讀取其他網站的 Cookie 與資料
+- **惡意網站不知道真正的 token 值**：它可以送出請求，但無法在 Header 裡放入正確的 `X-XSRF-TOKEN: abc5566`，因為它不知道 cookie 裡的內容
+- **後端比對不一致**：如果 Cookie 是 `abc5566`，但 Header 是空的或不匹配，伺服器就拒絕
+
+實際用法通常是：
+
+```text
+Browser                                 Server
+  | -- GET /form -> gets CSRF token -- >   |
+  | <----- form+hidden csrf_token ----     |
+  | -- POST /transfer body + csrf_token -> |
+  |                                        | -- validate token matches session -->
+  | <----- 200 OK ---------------------    |
+```
+
+常見做法有兩種：
+
+1. **Double Submit Cookie**
+   - Cookie 中存 `csrftoken=abc5566`
+   - Form 或 Header 也帶一份相同值 `X-XSRF-TOKEN: abc5566`
+   - 伺服器比較 Cookie 與 Header 是否一致
+
+2. **Server-side Session CSRF**
+   - server 產生 `csrf_token`，存在 session 中
+   - client 只把它放在 form / header 中
+   - server 檢查請求中的 token 是否跟 session 中的 token 一致
+
+這裡的重點不是「Cookie 不能用」，而是：**Cookie 會被自動附加，但不能保證它是由攻擊者所掌握；Header 則需要從 JavaScript 直接發送，而這在跨站場景中受到同源政策限制，所以它可以作為驗證值。**
+
+- CSRF Token 通常跟 session 綁定
+- 會放在 form hidden 欄位、或同步在 header / cookie + header 的雙重提交模式
+- 它不是「使用者身份」本身，也不是「JWT」
+
+##### 這裡最容易搞錯的點
+
+- **JWT 是 token**：裡面有 claims，可能代表身份與權限
+- **CSRF Token 是防禦 token**：不是拿來認證身分，而是避免偽造請求
+- **Session ID 是 session 識別**：用來識別某個登入會話
+- **TLS Session ID 是 TLS 層識別**：用來Reuse握手，不是登入或授權
+
+#### 4) One-Time Token（OTT）：用一次、用完就失效
+
+這類 token 常見於：
+
+- 重設密碼連結
+- 電子郵件驗證
+- SMS 驗證碼
+- high-risk 操作確認
+
+```text
+User                                  Server
+  | -- forgot password ------------>   |
+  |                                    | -- create random nonce + expiry -->
+  | <----- email link with token ----  | 
+  | -- click link /reset?token=abc --> |
+  |                                    | -- verify token once -->
+  |                                    | -- invalidate token -->
+  | <----- password reset success ---  |
+```
+
+特點：
+
+- 大多是短命
+- 只允許使用一次
+- 常用 nonce、timestamp、HMAC 簽章
+- 不代表持續登入狀態
+
+#### 5) API Key / Bearer Token：機器對機器最常見
+
+```text
+Client                               API Server
+  | -- GET /v1/users Authorization: Bearer <token> --> |
+  |                                                    | -- verify token / API key -->
+  | <--------------------- 200 OK -------------------- |
+```
+
+或：
+
+```text
+Client                         API Server
+  | -- X-API-Key: abc123 ------> |
+  |                              | -- check key in allowlist / db -->
+  | <------ 200 OK ------------  |
+```
+
+- **API Key**：通常較簡單，常見於 machine-to-machine
+- **Bearer Token**：把 token 當成「持有人憑證」；只要你拿到 token 就可用，屬於較直接的驗證機制
+- 這與 browser session 很不一樣：通常不依賴 Cookie，也不要求瀏覽器支援 `SameSite` 等網頁攻擊防禦
+
+#### 6) Hardware Token / Security Token：跟實體裝置綁定
+
+```text
+User / Browser                     Server                     Hardware Token
+  | -- login request --------------> |                          |
+  |                                  | -- challenge + nonce --> |
+  |                                  | <--- sign challenge ---- |
+  | -- response + signature ------>  |                          |
+  |                                  | -- verify signature --> |
+  | <------ success ---------------  |
+```
+
+- YubiKey、smart card、TPM、HSM 等都屬於這類
+- 常用於 MFA、U2F、FIDO2、PKI
+- 這些 token 強調「你有某個硬體根」；不是 TLS 握手 session，也不是 HTTP cookie
+
+#### 7) OAuth 2.0 / OIDC：衍生出許多 token 類型
+
+OAuth 2.0 主要是「授權」框架，不直接說「誰是誰」。OIDC（OpenID Connect）是它在上層加上身份認證。
+
+```text
+Client                              Auth Server                              Resource Server
+  | -- authorize / login ----------> |                                         |
+  | <----- authorization code -----  |                                         |
+  | -- exchange code for token -->   |                                         |
+  |                                  | -- issue access_token + refresh_token ->|
+  | <--- access_token -------------  |                                         |
+  | -- call API with Bearer token ---------------------------->                |
+  |                                                                            | -- validate token -->
+  | <---------------------------------------------------------- 200 OK |
+```
+
+常見 token：
+
+- **Access Token**：拿去向 resource server 取資料
+- **Refresh Token**：用來換新 access token
+- **ID Token**：說明「這個使用者是誰」
+
+注意：
+
+- OAuth 2.0 不是單一 token；它是一套授權流程
+- 產出的 access token 不一定是 JWT；也可能是 opaque token
+- 產出的 ID token 常常是 JWT，但它和 access token 的目的不同
+
+#### 整體比較：各種 token 的定位總表
+
+| 類型 | 核心用途 | 典型資料位置 | 是否代表登入狀態 | 是否適合長期持續存在 | 常見範例 |
+|---|---|---|---|---|---|
+| **TLS Session ID / Ticket** | 握手優化、重用加密狀態 | TLS library cache / client ticket | 否 | 短期 | `session_id`, `session ticket` |
+| **Session Token / Session ID** | 網站登入會話辨識 | Cookie + server store | **是** | 通常是 session 期間 | `SID=abc123` |
+| **Access Token** | API 授權 | Authorization header / JWT | 不完全是「登入」；更偏權限 | 通常短到中期 | `Bearer eyJ...` |
+| **ID Token** | 身分聲明 | JWT / frontend | **是**（身份資訊） | 依策略 | OIDC `id_token` |
+| **JWT** | 權限與身分格式化表達 | Header / local storage / cookie | 可能代表身份，也可能只是 token | 可短期或長期 | `sub`, `aud`, `exp` |
+| **CSRF Token** | 抵禦跨站偽造請求 | hidden field / cookie + header | 否 | 通常 one session | `csrf_token=xyz` |
+| **OTT** | 一次性驗證 | email link / OTP / SMS | 否 | 非常短 | reset-password token |
+| **API Key** | machine-to-machine 授權 | header / config / secret store | 否 | 可長期 | `X-API-Key` |
+| **Bearer Token** | 直接持有人驗證 | Authorization header | 否 | 依設定 | `Authorization: Bearer ...` |
+| **Hardware Token** | 強認證 / MFA / device-bound | YubiKey / TPM / smart card | 否 | 長期 | FIDO2 / U2F |
+| **OAuth 2.0 Token** | 授權流程與 access token 請求 | client storage / browser | 不一定 | 可短期 | `code`, `access_token`, `refresh_token` |
+
+#### 一句話總結
+
+- **TLS Session ID / Session Ticket**：讓握手更快
+- **Session ID**：讓伺服器知道這個登入者是誰
+- **JWT / Access Token / ID Token**：讓伺服器知道「我拿到的這個 token 代表什麼權限／身份」
+- **CSRF Token**：讓網站知道「這個請求不是另一個網站偷偷偽造的」
+- **OTT / OTP / API Key / Hardware Token**：都是不同場景下的特定驗證或授權工具
+
+這一點非常重要：**Session ID / Session Ticket 是跟「傳輸安全」或「登入會話」相關的識別，但它不是 JWT、也不是 API auth token，更不是 CSRF 防護 token。**它們是同一個詞語「token」在不同層級上的不同角色。 
+
+---
+
 <a id="cn-a"></a>
 ## A) 詞彙表
 
@@ -2153,5 +2571,5 @@ curl -v --http2 https://host/
 - 現代 TLS 意味著只用 TLS 1.2/1.3、ECDHE 金鑰交換、AEAD 加密演算法 —— 每一個被淘汰的舊選項背後，都對應著一個有名有姓的歷史攻擊（[§16](#cn-16)）
 - 一張憑證的可信度取決於它背後的信任鏈 —— 自簽憑證用在封閉系統沒問題，但不適合任何公開場合（[§8](#cn-8)）
 - OpenSSL 的命令列工具只用一小組好記的指令，就涵蓋了產生、檢視、轉換與線上測試（[§11](#cn-11)、[附錄 B](#cn-b)）
-- HTTP/2 與 HTTP/3 主要解決的是 HTTP/1.x 遺留下來的連線／併發瓶頸，而不是安全性問題 —— 但 HTTP/3 把 TLS 1.3 直接內建進了它的傳輸層握手中（[§12](#cn-12)、[§14](#cn-14)、[§15](#cn-15)）
+- HTTP/2 與 HTTP/3 主要解決的是 HTTP/1.x 遺留下來的連線／併發瓶頸，而不是安全性問題 —— 但 HTTP/3 把 TLS 1.3 直接內建進了它的傳輸層握手中（[§12](#cn-12)、[§14](#cn-14)）
 - 一個後端是否「支援」以上這一切，取決於應用程式伺服器、TLS 函式庫，以及前方任何反向代理三者共同配合的結果 —— [§20](#cn-20)–[§21](#cn-21) 完整示範了一個真實實作（bmcweb）如何從頭到尾把這些串接起來
