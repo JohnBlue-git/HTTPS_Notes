@@ -380,7 +380,7 @@ Verify: 計算 Cert 雜湊 Hash( CertInfo || Server Public Key ) == 解密 CA �
           │  Server Certificate (server.crt)                        │
           ├─────────────────────────────────────────────────────────┤
           │  • Domain Name: *.example.com                           │
-          │  • Server Public Key (長期非對稱公鑰)                    │
+          │  • Server Public Key (長期非對稱公鑰)                     │
           │  • CA Signature = Sign(Cert Hash, CA Private Key)       │
           └─────────────────────────────────────────────────────────┘
 
@@ -420,10 +420,10 @@ Verify: 計算 Cert 雜湊 Hash( CertInfo || Server Public Key ) == 解密 CA �
   │      └──> 驗證通過：從 CertInfo 提取出 Server Public Key                           │
   │                                                                                 │
   │  B. 用 Server Public Key 驗證 Server ECDHE 簽章                                   │
-  │     → 證明資料未被竄改，且 Server 確實持有對應私鑰                                     │
+  │     → 證明資料未被竄改，且 Server 確實持有對應私鑰                                    │
   │     → 驗證 H(ClientRandom || ServerRandom || ECDHE PubKey)                       |
   |        == D(ECDHE Signature, Server Public Key)                                 │
-  │        └──> 驗證通過：確認 ECDHE 參數安全，且 Server 持有私鑰                      │
+  │        └──> 驗證通過：確認 ECDHE 參數安全，且 Server 持有私鑰                         │
   │                                                                                 │
   │ ─── 6. ClientKeyExchange ─────────────────────────────────────────────────────> │
   │       (Client ECDHE PubKey)                                                     │
@@ -432,7 +432,7 @@ Verify: 計算 Cert 雜湊 Hash( CertInfo || Server Public Key ) == 解密 CA �
   │                                                                                 │
   │ <── 8. [ChangeCipherSpec] & Finished ────────────────────────────────────────── │
   │                                                                                 │
-  │  [雙方獨立算出同一把對稱金鑰]                                                        │
+  │  [雙方獨立算出同一把對稱金鑰]                                                       │
   │  Client: Compute(Client ECDHE PrivKey + Server ECDHE PubKey + Randoms)          │
   │                                                                                 │
   │  【 Session Key / AES Key 】 <─────── 兩者一致 ────────                           │
@@ -530,7 +530,7 @@ Client                                                                Server
   │       (ServerRandom, Selected Cipher Suite)                                     │
   │                                                                                 │
   │ <── 3. Certificate ──────────────────────────────────────────────────────────── │
-  │       (server.crt；內含 Server Public Key 與 CA Signature)                        │
+  │       (server.crt；內含 Server Public Key 與 CA Signature)                       │
   │                                                                                 │
   │ <── 4. ServerKeyExchange ────────────────────────────────────────────────────── │
   │       (Server ECDHE PubKey + ECDHE Signature)                                   │
