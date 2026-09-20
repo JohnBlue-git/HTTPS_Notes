@@ -1066,11 +1066,10 @@ But note:
 
 ### HTTP/3 (2022, RFC 9114, based on QUIC, RFC 9000)
 
-- Runs on top of **QUIC** (built on UDP) instead of TCP
-- TLS 1.3 is built directly into the transport-layer handshake, rather than layered on top
-- Every stream is independently reliable — packet loss only stalls the one stream it belongs to, fixing the head-of-line blocking problem left over from HTTP/2
+- Runs on top of **QUIC** (built on UDP) instead of TCP, and TLS 1.3 is built directly into the transport-layer handshake, rather than layered on top
+- Can offer **0-RTT** reconnection (with the same replay-risk considerations as TLS 1.3 0-RTT — see [§14](#cn-14))
+- Every stream is independently reliable — packet loss only stalls the one stream it belongs to, fixing the head-of-line blocking problem left over from HTTP/2 (each stream would have its independent packet counting id)
 - **Connection migration** — a connection can survive changes in the network environment (e.g., switching from Wi-Fi to mobile data), because the connection is identified by a Connection ID rather than an IP/port combination
-- Can offer **0-RTT** reconnection to previously visited servers (with the same replay-risk considerations as TLS 1.3 0-RTT — see [§14](#cn-14))
 
 > The "evolution" here should be viewed as a whole from 1.0 → 1.1 → 2 → 3: §12 is an overview comparing HTTP versions along with their transport / connection models; §14 and §15 then supply the further transport-layer changes of TLS 1.3 and QUIC/HTTP/3. Folding §14/§15 entirely into §12 would mix up the "HTTP protocol version comparison" with the "TLS/QUIC transport-layer improvements," so the most natural way to write it is: §12 defines the main axis, and §14/§15 are transport-layer detail extensions under that axis. In practice they are linked evolutions, not several fully independent pieces.
 
