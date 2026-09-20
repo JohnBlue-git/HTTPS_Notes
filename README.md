@@ -402,43 +402,45 @@ Restating the goal from [§2](#cn-2): using only messages sent over a connection
   │ <── 3. Certificate ─────────────────────────────────────────────────────────────────────────── │
   │        CA Signature =                                                                          │
   │          E( Hash(CertInfo || Server Public Key), Server Private Key )                          │
-  │       (server.crt; contains the Server Public Key and the CA Signature)                        │
+  |          E: RSA-PSS, ECDSA, Static RSA should deprecated                                       |
+  │       (server.crt: contains the Server Public Key and the CA Signature)                        │
   │                                                                                                │
   │ <── 4. ServerKeyExchange ───────────────────────────────────────────────────────────────────── │
-  │        ECDHE Signature =                                                                       │
-  │          E( Hash(ClientRandom || ServerRandom || Server ECDHE PubKey),                         │
-  │                                                 Server Private Key )                           │
-  │       (Server ECDHE PubKey + ECDHE Signature)                                                  │
+  │        Server Params PubKey                                                                    │
+  │        Server Params =                                                                         │
+  │          E( Hash(ClientRandom || ServerRandom || Server Params PubKey),                        │
+  │                                                      Server Private Key )                      │
+  |          E: DHE, ECDHE                                                                         |
   │                                                                                                │
   │ <── 5. ServerHelloDone ─────────────────────────────────────────────────────────────────────── │
   │                                                                                                │
   │  [Client verification phase]                                                                   │
   │  A. Verify the Certificate using the CA Public Key                                             │
   │     → Confirms the certificate was issued by the CA, and extracts the Server Public Key        │
-  │   1. Compute the cert hash:    Hash_cert = Hash( CertInfo || Server Public Key )               │
-  │   2. Decrypt the CA signature: Hash_ca = D( CA Signature, CA Public Key )                      │
-  │   3. Check the equation:       Hash_cert == Hash_ca                                            │
-  │      └──> Verified: extract the Server Public Key from CertInfo                                │
+  │       Hash_cert = Hash( CertInfo || Server Public Key )                                        │
+  │       Hash_ca = D( CA Signature, CA Public Key )                                               │
+  │       Hash_cert == Hash_ca                                                                     │
+  │                 └──> Verified: extract the Server Public Key from CertInfo                     │
   │                                                                                                │
   │  B. Verify the Server ECDHE signature using the Server Public Key                              │
   │     → Proves the data was not tampered with and the Server holds the matching private key      │
-  │     → Verify H(ClientRandom || ServerRandom || ECDHE PubKey)                                   │
-  │        == D(ECDHE Signature, Server Public Key)                                                │
-  │        └──> Verified: ECDHE parameters are authentic and the Server holds the private key      │
+  │     → H(ClientRandom || ServerRandom || Server Params PubKey)                                  │
+  │       == D(Server Params, Server Public Key)                                                   │
+  │        └──> Verified: parameters are authentic and the Server holds the private key            │
   │                                                                                                │
   │ ─── 6. ClientKeyExchange ────────────────────────────────────────────────────────────────────> │
-  │       (Client ECDHE PubKey)                                                                    │
+  │       (Client Params PubKey)                                                                   │
   │                                                                                                │
   │ ─── 7. [ChangeCipherSpec] & Finished ────────────────────────────────────────────────────────> │
   │                                                                                                │
   │ <── 8. [ChangeCipherSpec] & Finished ───────────────────────────────────────────────────────── │
   │                                                                                                │
   │  [Both sides independently derive the same symmetric key]                                      │
-  │  Client: Compute(Client ECDHE PrivKey + Server ECDHE PubKey + Randoms)                         │
+  │  Client: Compute(Client Params PrivKey + Server Params PubKey + Randoms)                       │
   │                                                                                                │
   │  [ Session Key / AES Key ] <─────── both match ────────                                        │
   │                                                                                                │
-  │  Server: Compute(Server ECDHE PrivKey + Client ECDHE PubKey + Randoms)                         │
+  │  Server: Compute(Server Params PrivKey + Client Params PubKey + Randoms)                       │
   │                                                                                                │
 
 ====================================================================================================
@@ -568,7 +570,7 @@ Everything above authenticates the *server* to the client. Some deployment scena
   │       (server.crt; contains the Server Public Key and the CA Signature)                        │
   │                                                                                                │
   │ <── 4. ServerKeyExchange ───────────────────────────────────────────────────────────────────── │
-  │       (Server ECDHE PubKey + ECDHE Signature)                                                  │
+  │       (Server Params PubKey + Server Params)                                                   │
   │                                                                                                │
   │ <── 4.5 CertificateRequest ─────────────────────────────────────────────────────────────────── │ <== [mTLS addition]
   │       (Server asks the Client for a certificate; may attach a list of trusted CAs)             │
@@ -577,7 +579,7 @@ Everything above authenticates the *server* to the client. Some deployment scena
   │                                                                                                │
   │  [Client verifies Server phase]                                                                │
   │  A. Verify server.crt using the CA Public Key (extract the Server Public Key)                  │
-  │  B. Verify the Server ECDHE signature using the Server Public Key                              │
+  │  B. Verify the Server Params using the Server Public Key                                       │
   │     (confirms Server identity and parameters)                                                  │
   │                                                                                                │
   │ ─── 5.5 Certificate ─────────────────────────────────────────────────────────────────────────> │ <== [mTLS addition]
@@ -600,11 +602,11 @@ Everything above authenticates the *server* to the client. Some deployment scena
   │ <── 8. [ChangeCipherSpec] & Finished ───────────────────────────────────────────────────────── │
   │                                                                                                │
   │  [Both sides independently derive the same symmetric key]                                      │
-  │  Client: Compute(Client ECDHE PrivKey + Server ECDHE PubKey + Randoms)                         │
+  │  Client: Compute(Client Params PrivKey + Server Params PubKey + Randoms)                       │
   │                                                                                                │
   │  [ Session Key / AES Key ] <─────── both match ────────                                        │
   │                                                                                                │
-  │  Server: Compute(Server ECDHE PrivKey + Client ECDHE PubKey + Randoms)                         │
+  │  Server: Compute(Server Params PrivKey + Client Params PubKey + Randoms)                       │
   │                                                                                                │
 
 ====================================================================================================
