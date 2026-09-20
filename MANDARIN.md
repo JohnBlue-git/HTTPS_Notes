@@ -565,7 +565,7 @@ Client                                                                Server
   │       (ServerRandom, Selected Cipher Suite)                                     │
   │                                                                                 │
   │ <── 3. Certificate ──────────────────────────────────────────────────────────── │
-  │       (server.crt: Server Public Key, CA Signature)                             │
+  │       (server.crt; Server Public Key, CA Signature)                             │
   │                                                                                 │
   │ <── 4. ServerKeyExchange ────────────────────────────────────────────────────── │
   │       (Server Params PubKey, Server Params)                                     │
@@ -580,7 +580,7 @@ Client                                                                Server
   │  B. 用 Server Public Key 驗證 Server Params 簽章 (確認 Server 身份與參數安全)        │
   │                                                                                 │
   │ ─── 5.5 Certificate ──────────────────────────────────────────────────────────> │ <== [mTLS 補充]
-  │       (client.crt: Client Public Key, CA Signature)                             │
+  │       (client.crt; Client Public Key, CA Signature)                             │
   │                                                                                 │
   │ ─── 6. ClientKeyExchange ─────────────────────────────────────────────────────> │
   │       (Client Params PubKey)                                                    │
