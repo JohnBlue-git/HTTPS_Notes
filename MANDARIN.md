@@ -1013,17 +1013,12 @@ HTTP/2：訊息被切成二進位 frame，再交給 stream / priority / length �
 
 概念圖：Multiplexing vs HOL blocking
 ```text
-HTTP/1.1：每個請求幾乎要自己佔用一條連線
+HTTP/1.1：每個請求都佔用連線
 
 Req A ──┐
-Req B ──┼──> 連線 1
+Req B ──┼──> 連線
 Req C ──┤
 Req D ──┘
-
-Req E ──┐
-Req F ──┼──> 連線 2
-Req G ──┤
-Req H ──┘
 
 => 需要很多條連線，且請求只好排隊等待
 
