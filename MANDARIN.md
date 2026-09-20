@@ -400,44 +400,46 @@ Verify: 計算 Cert 雜湊 Hash( CertInfo || Server Public Key ) == 解密 CA �
   │                                                                                 │
   │ <── 3. Certificate ──────────────────────────────────────────────────────────── │
   │        CA Signature =                                                           |
-  |          E( Hash(CertInfo || Server Public Key), Server Private Key )           |
+  |          E( Hash(CertInfo || Server Public Key), CA Private Key )               |
+  |          E: RSA-PSS or ECDSA, Static RSA should deprcated                       |
   │       (server.crt；內含 Server Public Key 與 CA Signature)                       │
   │                                                                                 │
   │ <── 4. ServerKeyExchange ────────────────────────────────────────────────────── │
-  │        ECDHE Signature =                                                        |
-  |          E( Hash(ClientRandom || ServerRandom || Server ECDHE PubKey)           |
-  |                                                 , Server Private Key )          |
-  │       (Server ECDHE PubKey + ECDHE Signature)                                   │
+  |        Server Params PubKey,
+  │        Server Params =                                                          |
+  |          E( Hash(ClientRandom || ServerRandom || Server Params PubKey)          |
+  |                                                   , Server Private Key )        |
+  |          E: DHE, ECDHE                                                          |
   │                                                                                 │
   │ <── 5. ServerHelloDone ──────────────────────────────────────────────────────── │
   │                                                                                 │
   │  [Client 驗證階段]                                                               │
   │  A. 用 CA Public Key 驗證 Certificate                                            │
-  │     → 確認憑證是 CA 簽發，且從中取出 Server Public Key                               │
-  │   1. 計算 Cert 雜湊： Hash_cert = Hash( CertInfo || Server Public Key )           │
-  │   2. 解密 CA 簽章： Hash_ca = D( CA Signature, CA Public Key )                    │
-  │   3. 公式驗證：     Hash_cert == Hash_ca                                          │
-  │      └──> 驗證通過：從 CertInfo 提取出 Server Public Key                           │
+  │     → 確認憑證是 CA 簽發，且從中取出 Server Public Key                              │
+  │       Hash_cert = Hash( CertInfo || Server Public Key )                         │
+  │       Hash_ca = D( CA Signature, CA Public Key )                                │
+  │       Hash_cert == Hash_ca                                                      │
+  │        └──> 驗證通過：從 CertInfo 提取出 Server Public Key                         │
   │                                                                                 │
-  │  B. 用 Server Public Key 驗證 Server ECDHE 簽章                                   │
-  │     → 證明資料未被竄改，且 Server 確實持有對應私鑰                                    │
-  │     → 驗證 H(ClientRandom || ServerRandom || ECDHE PubKey)                       |
-  |        == D(ECDHE Signature, Server Public Key)                                 │
-  │        └──> 驗證通過：確認 ECDHE 參數安全，且 Server 持有私鑰                         │
+  │  B. 用 Server Public Key 驗證 Server Params.                                     │
+  │     → 證明資料未被竄改，且 Server 確實持有對應 Public Private Key                    │
+  │       H(ClientRandom || ServerRandom || Server Params PubKey)                   |
+  |         == D(Server Params, Server Public Key)                                  │
+  │         └──> 驗證通過：確認 ECDHE 參數安全，且 Server 持有私鑰                        │
   │                                                                                 │
   │ ─── 6. ClientKeyExchange ─────────────────────────────────────────────────────> │
-  │       (Client ECDHE PubKey)                                                     │
+  │       (Client Params PubKey)                                                    │
   │                                                                                 │
   │ ─── 7. [ChangeCipherSpec] & Finished ─────────────────────────────────────────> │
   │                                                                                 │
   │ <── 8. [ChangeCipherSpec] & Finished ────────────────────────────────────────── │
   │                                                                                 │
   │  [雙方獨立算出同一把對稱金鑰]                                                       │
-  │  Client: Compute(Client ECDHE PrivKey + Server ECDHE PubKey + Randoms)          │
+  │  Client: Compute(Client Params PrivKey + Server Params PubKey + Randoms)        │
   │                                                                                 │
   │  【 Session Key / AES Key 】 <─────── 兩者一致 ────────                           │
   │                                                                                 │
-  │  Server: Compute(Server ECDHE PrivKey + Client ECDHE PubKey + Randoms)          │
+  │  Server: Compute(Server Params PrivKey + Client Params PubKey + Randoms)        │
   │                                                                                 │
 
 =================================================================================================================
@@ -563,10 +565,10 @@ Client                                                                Server
   │       (ServerRandom, Selected Cipher Suite)                                     │
   │                                                                                 │
   │ <── 3. Certificate ──────────────────────────────────────────────────────────── │
-  │       (server.crt；內含 Server Public Key 與 CA Signature)                       │
+  │       (server.crt: Server Public Key, CA Signature)                             │
   │                                                                                 │
   │ <── 4. ServerKeyExchange ────────────────────────────────────────────────────── │
-  │       (Server ECDHE PubKey + ECDHE Signature)                                   │
+  │       (Server Params PubKey, Server Params)                                     │
   │                                                                                 │
   │ <── 4.5 CertificateRequest ───────────────────────────────────────────────────  │ <== [mTLS 補充]
   │       (Server 要求 Client 提供憑證，可附上受信任 CA 清單)                            │
@@ -575,31 +577,30 @@ Client                                                                Server
   │                                                                                 │
   │  [Client 驗證 Server 階段]                                                       │
   │  A. 用 CA Public Key 驗證 server.crt (取出 Server Public Key)                     │
-  │  B. 用 Server Public Key 驗證 Server ECDHE 簽章 (確認 Server 身份與參數安全)         │
+  │  B. 用 Server Public Key 驗證 Server Params 簽章 (確認 Server 身份與參數安全)        │
   │                                                                                 │
   │ ─── 5.5 Certificate ──────────────────────────────────────────────────────────> │ <== [mTLS 補充]
-  │       (client.crt；內含 Client Public Key 與 CA Signature)                       │
+  │       (client.crt: Client Public Key, CA Signature)                             │
   │                                                                                 │
   │ ─── 6. ClientKeyExchange ─────────────────────────────────────────────────────> │
-  │       (Client ECDHE PubKey)                                                     │
+  │       (Client Params PubKey)                                                    │
   │                                                                                 │
   │ ─── 6.5 CertificateVerify ───────────────────────────────────────────────────>  │ <== [mTLS 補充]
-  │       Signature = E( Hash(所有歷史 Handshake 訊息), Client Private Key )          │
   │                                                                                 │
   │      [Server 驗證 Client 階段]                                                   │ <== [mTLS 補充]
   │      A. 用 CA Public Key 驗證 client.crt → 確認憑證合法並取出【Client Public Key】   │
-  │      B. 用 Client Public Key 驗證 Client ECDHE 簽章 ((確認 Client 身份與參數安全))   │
+  │      B. 用 Client Public Key 驗證 Client Params 簽章 ((確認 Client 身份與參數安全))  │
   │                                                                                 │
   │ ─── 7. [ChangeCipherSpec] & Finished ─────────────────────────────────────────> │
   │                                                                                 │
   │ <── 8. [ChangeCipherSpec] & Finished ────────────────────────────────────────── │
   │                                                                                 │
   │  [雙方獨立算出同一把對稱金鑰]                                                       │
-  │  Client: Compute(Client ECDHE PrivKey + Server ECDHE PubKey + Randoms)          │
+  │  Client: Compute(Client Params PrivKey + Server Params PubKey + Randoms)        │
   │                                                                                 │
   │  【 Session Key / AES Key 】 <─────── 兩者一致 ────────                           │
   │                                                                                 │
-  │  Server: Compute(Server ECDHE PrivKey + Client ECDHE PubKey + Randoms)          │
+  │  Server: Compute(Server Params PrivKey + Client Params PubKey + Randoms)        │
   │                                                                                 │
 
 =================================================================================================================
